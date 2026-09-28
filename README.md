@@ -152,10 +152,7 @@ BSC_RPC_URL=<rpc url> BSC_FORK_BLOCK=<block> forge test --match-contract ForkBsc
 **Why `TickMath` comes from Uniswap:** PancakeSwap's own `TickMath` is pinned to Solidity `<0.8`, so `V3TwapOracle` uses Uniswap's 0.8 port instead. Its constants and logic are identical to PancakeSwap's. All other DEX interfaces come from `pancake-v3-contracts`.
 
 ## Known limitations
-
-- **Unclaimed prizes lock the rest of the pot.** Leftovers can only be rescued once every winner has claimed. A claim deadline isn't implemented yet.
 - **No refund if randomness never arrives.** If no VRF answer ever arrives, the pot stays in the pool.
 - **Buying many tickets at once can run out of gas.** There's no limit per transaction, and each ticket costs about 50k gas.
 - **Routing is simple.** A direct pool is always preferred over a route through a hub, even if the direct pool is much shallower. Call `findRoute` before creating a pool to see which route it will use.
-- **Declared but not used yet:** `winfallAmount`, `threshold`, `difficultyBps` and `timelock`.
 - **PancakeSwap Infinity (V4) isn't supported.** If liquidity moves there, write a new `ISwapper` implementation and switch to it with `setSwapper`. Infinity pools have no built-in TWAP, so the new swapper needs another price source.
