@@ -21,6 +21,9 @@ jobs:
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # same version as local development, forge fmt output differs between releases
+          version: v1.7.1
 
       - name: Show Forge version
         run: forge --version
