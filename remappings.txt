@@ -1,0 +1,5 @@
+forge-std/=lib/forge-std/src/
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/
+@uniswap/v3-core/=lib/v3-core/
+@pancakeswap/v3-core/=lib/pancake-v3-contracts/projects/v3-core/

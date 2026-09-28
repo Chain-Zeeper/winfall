@@ -1,0 +1,37 @@
+name: CI
+
+permissions: {}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge fmt
+        run: forge fmt --check
+
+      - name: Run Forge build
+        run: forge build --sizes
+
+      # fork tests (ForkBscTest) need a bnb chain rpc and are flaky on public nodes, run them locally:
+      # BSC_RPC_URL=<rpc> BSC_FORK_BLOCK=<block> forge test --match-contract ForkBscTest
+      - name: Run Forge tests
+        run: forge test -vvv --no-match-contract ForkBscTest
