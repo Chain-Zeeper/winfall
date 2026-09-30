@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
-import "../src/Pool.sol";
+import "../src/MegaPool.sol";
 import {PoolClone} from "./PoolClone.sol";
 import {IPool} from "../src/interface/IPool.sol";
 import {MockCoord} from "./Retry.t.sol";
@@ -13,15 +13,16 @@ contract Reverter {
 }
 
 contract ClaimTest is Test {
-    Pool pool;
+    MegaPool pool;
     MockCoord coord;
     address a = address(0xA1);
     address b = address(0xB2);
     address c = address(0xC3);
 
-    function _pool(uint256[] memory shares) internal returns (Pool p) {
-        IPool.PoolConfig memory w = IPool.PoolConfig(shares.length, shares, address(0), 0, 0, block.timestamp + 1 days);
-        p = PoolClone.make(new Pool(address(coord), bytes32(0), 1), address(this), w);
+    function _pool(uint256[] memory shares) internal returns (MegaPool p) {
+        IPool.PoolConfig memory w =
+            IPool.PoolConfig(shares.length, shares, address(0), 0, 0, block.timestamp + 1 days, 0, 0, 0);
+        p = PoolClone.make(new MegaPool(address(coord), bytes32(0), 1), address(this), w);
     }
 
     function setUp() public {
@@ -97,7 +98,7 @@ contract ClaimTest is Test {
         shares[0] = 50;
         shares[1] = 30;
         shares[2] = 20;
-        Pool p = _pool(shares);
+        MegaPool p = _pool(shares);
         p.safeMint(a, 1);
         p.safeMint(b, 2);
         vm.deal(address(p), 80 ether);
@@ -127,13 +128,13 @@ contract ClaimTest is Test {
         uint256[] memory shares = new uint256[](2);
         shares[0] = 1;
         shares[1] = 0;
-        IPool.PoolConfig memory w = IPool.PoolConfig(2, shares, address(0), 0, 0, block.timestamp + 1 days);
-        Pool impl = new Pool(address(coord), bytes32(0), 1);
+        IPool.PoolConfig memory w = IPool.PoolConfig(2, shares, address(0), 0, 0, block.timestamp + 1 days, 0, 0, 0);
+        MegaPool impl = new MegaPool(address(coord), bytes32(0), 1);
         vm.expectRevert(IPool.INVALID_WINNER_SHARES.selector);
         this.makeExt(impl, w);
     }
 
-    function makeExt(Pool impl, IPool.PoolConfig memory w) external returns (Pool) {
+    function makeExt(MegaPool impl, IPool.PoolConfig memory w) external returns (MegaPool) {
         return PoolClone.make(impl, address(this), w);
     }
     receive() external payable {}

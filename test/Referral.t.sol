@@ -2,7 +2,7 @@
 pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Pool} from "../src/Pool.sol";
+import {MegaPool} from "../src/MegaPool.sol";
 import "../src/PoolManager.sol";
 import {Winfall} from "../src/interface/IPoolManager.sol";
 import {MockCoordSub} from "./Manager.t.sol";
@@ -30,7 +30,7 @@ contract ReferralTest is Test {
     function setUp() public {
         MockCoordSub coord = new MockCoordSub();
         mgr = new PoolManager(
-            address(this), treasury, address(new Pool(address(coord), bytes32(0), 5)), address(coord), 5
+            address(this), treasury, address(new MegaPool(address(coord), bytes32(0), 5)), address(coord), 5
         );
         tok = new RTok();
         vm.deal(bob, 100 ether);

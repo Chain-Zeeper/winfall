@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
-import "../src/Pool.sol";
+import "../src/MegaPool.sol";
 import {PoolClone} from "./PoolClone.sol";
 import {IPool} from "../src/interface/IPool.sol";
 import {MockCoord} from "./Retry.t.sol";
@@ -14,7 +14,7 @@ contract GasBurner {
 }
 
 contract DistributeTest is Test {
-    Pool pool;
+    MegaPool pool;
     MockCoord coord;
 
     function setUp() public {
@@ -24,8 +24,8 @@ contract DistributeTest is Test {
         shares[1] = 30;
         shares[2] = 20;
         shares[3] = 10;
-        IPool.PoolConfig memory w = IPool.PoolConfig(4, shares, address(0), 0, 0, block.timestamp + 1 days);
-        pool = PoolClone.make(new Pool(address(coord), bytes32(0), 1), address(this), w);
+        IPool.PoolConfig memory w = IPool.PoolConfig(4, shares, address(0), 0, 0, block.timestamp + 1 days, 0, 0, 0);
+        pool = PoolClone.make(new MegaPool(address(coord), bytes32(0), 1), address(this), w);
         for (uint160 i = 1; i <= 6; i++) {
             pool.safeMint(address(0x1000 + i), i);
         }
@@ -103,10 +103,10 @@ contract DistributeTest is Test {
     function test_revertsBeforeDraw() public {
         uint256[] memory shares = new uint256[](1);
         shares[0] = 1;
-        Pool p = PoolClone.make(
-            new Pool(address(coord), bytes32(0), 1),
+        MegaPool p = PoolClone.make(
+            new MegaPool(address(coord), bytes32(0), 1),
             address(this),
-            IPool.PoolConfig(1, shares, address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(1, shares, address(0), 0, 0, block.timestamp + 1 days, 0, 0, 0)
         );
         vm.expectRevert(IPool.WINNERS_NOT_PICKED.selector);
         p.distribute(1);

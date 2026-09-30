@@ -9,7 +9,7 @@ import {ISwapper} from "./interface/ISwapper.sol";
 import {IVRFCoordinatorV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
 import {Winfall, IPoolManager} from "./interface/IPoolManager.sol";
 import {IPool} from "./interface/IPool.sol";
-import {Pool} from "./Pool.sol";
+import {MegaPool} from "./MegaPool.sol";
 
 error INVALID_CLOSE_TIME();
 error WINFALL_STILL_OPEN();
@@ -28,7 +28,7 @@ error USE_BUY_TICKETS();
 error EXPIRED();
 error NOTHING_TO_CLAIM();
 
-/// @notice deploys every winfall as a cheap EIP-1167 clone of one Pool implementation and owns all of them.
+/// @notice deploys every winfall as a cheap EIP-1167 clone of one MegaPool implementation and owns all of them.
 /// @dev this contract must own the chainlink vrf subscription, it adds each new pool as a consumer.
 ///      roles: DEFAULT_ADMIN_ROLE grants/revokes roles and does the sensitive actions (implementation, rescue),
 ///      POOL_CREATOR_ROLE creates and runs pools, any number of accounts can hold it
@@ -45,7 +45,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     IVRFCoordinatorV2Plus public immutable VRF_COORDINATOR;
     uint256 public immutable vrfSubscriptionId;
 
-    /// Pool implementation new winfalls are cloned from
+    /// MegaPool implementation new winfalls are cloned from
     address public poolImplementation;
     address[] public allPools;
 
@@ -132,14 +132,18 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     }
 
     function _setPoolImplementation(address implementation) internal {
-        // vrf config is baked into the implementation, it has to point at the subscription this manager owns
-        require(
-            address(Pool(payable(implementation)).VRF_COORDINATOR()) == address(VRF_COORDINATOR)
-                && Pool(payable(implementation)).vrfSubscriptionId() == vrfSubscriptionId,
-            VRF_CONFIG_MISMATCH()
-        );
+        _checkVrfConfig(implementation);
         poolImplementation = implementation;
         emit PoolImplementationSet(implementation);
+    }
+
+    /// @dev vrf config is baked into an implementation, it has to point at the subscription this manager owns.
+    function _checkVrfConfig(address implementation) internal view {
+        require(
+            address(MegaPool(payable(implementation)).VRF_COORDINATOR()) == address(VRF_COORDINATOR)
+                && MegaPool(payable(implementation)).vrfSubscriptionId() == vrfSubscriptionId,
+            VRF_CONFIG_MISMATCH()
+        );
     }
 
     /// @notice clones a new pool, initializes it with this manager as owner and registers it as a vrf consumer
@@ -161,21 +165,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
             route = swapper.findRoute(w.paymentToken, w.currency);
         }
 
-        pool = Clones.clone(poolImplementation);
-        IPool(pool)
-            .initialize(
-                address(this),
-                w.name,
-                symbol,
-                IPool.PoolConfig({
-                totalWinners: w.winningShares.length,
-                winnerShares: w.winningShares,
-                currency: w.currency,
-                winfallAmount: winfallAmount,
-                threshold: threshold,
-                closeTime: w.closeTime
-            })
-            );
+        pool = _deployPool(symbol, w, winfallAmount, threshold);
         VRF_COORDINATOR.addConsumer(vrfSubscriptionId, pool);
 
         _winfalls[pool] = w;
@@ -187,6 +177,33 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         emit PoolCreated(pool, w.name, w.closeTime);
     }
 
+    /// @dev clones the MegaPool implementation. difficultyBps 0 and a single round make it a plain lottery round
+    function _deployPool(string calldata symbol, Winfall calldata w, uint256 winfallAmount, uint256 threshold)
+        internal
+        returns (address pool)
+    {
+        pool = Clones.clone(poolImplementation);
+        IPool(pool).initialize(address(this), w.name, symbol, _poolConfig(w, winfallAmount, threshold));
+    }
+
+    function _poolConfig(Winfall calldata w, uint256 winfallAmount, uint256 threshold)
+        internal
+        pure
+        returns (IPool.PoolConfig memory)
+    {
+        return IPool.PoolConfig({
+            totalWinners: w.winningShares.length,
+            winnerShares: w.winningShares,
+            currency: w.currency,
+            winfallAmount: winfallAmount,
+            threshold: threshold,
+            closeTime: w.closeTime,
+            difficultyBps: w.difficultyBps,
+            totalRounds: w.totalRounds,
+            roundDuration: w.roundDuration
+        });
+    }
+
     // ---- pool owner actions, the manager owns every pool and forwards them by role ----
 
     function requestWinners(address pool) external onlyRole(POOL_CREATOR_ROLE) returns (uint256 requestId) {
@@ -195,12 +212,12 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     /// @notice frees the pool's slot on the vrf subscription once its seed has arrived
     function releaseVrfConsumer(address pool) external onlyRole(POOL_CREATOR_ROLE) {
-        require(Pool(payable(address(_pool(pool)))).randomnessFulfilled(), WINFALL_STILL_OPEN());
+        require(MegaPool(payable(address(_pool(pool)))).randomnessFulfilled(), WINFALL_STILL_OPEN());
         VRF_COORDINATOR.removeConsumer(vrfSubscriptionId, pool);
     }
 
     function setPoolBaseURI(address pool, string calldata newBaseURI) external onlyRole(POOL_CREATOR_ROLE) {
-        Pool(payable(address(_pool(pool)))).setBaseURI(newBaseURI);
+        MegaPool(payable(address(_pool(pool)))).setBaseURI(newBaseURI);
     }
 
     function rescuePoolFunds(address pool, address token, address to, uint256 amount)
@@ -281,7 +298,8 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     function _checkBuy(address pool, uint256 count) internal view returns (Winfall storage w) {
         w = _winfalls[pool];
         require(w.pool != address(0), UNKNOWN_POOL(pool));
-        require(block.timestamp < w.closeTime, POOL_CLOSED());
+        // ask the pool: a MegaPool's close time moves with its rounds
+        require(IPool(pool).isOpen(), POOL_CLOSED());
         require(count > 0, ZERO_TICKETS());
     }
 

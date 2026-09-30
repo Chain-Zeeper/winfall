@@ -3,7 +3,7 @@ pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
-import {Pool} from "../src/Pool.sol";
+import {MegaPool} from "../src/MegaPool.sol";
 import {PoolManager, INVALID_CLOSE_TIME, UNKNOWN_POOL, VRF_CONFIG_MISMATCH} from "../src/PoolManager.sol";
 import {Winfall} from "../src/interface/IPoolManager.sol";
 import {IPool} from "../src/interface/IPool.sol";
@@ -28,18 +28,18 @@ contract MockCoordSub {
     function fulfill(address p, uint256 id, uint256 word) external {
         uint256[] memory w = new uint256[](1);
         w[0] = word;
-        Pool(payable(p)).rawFulfillRandomWords(id, w);
+        MegaPool(payable(p)).rawFulfillRandomWords(id, w);
     }
 }
 
 contract ManagerTest is Test {
     MockCoordSub coord;
-    Pool impl;
+    MegaPool impl;
     PoolManager mgr;
 
     function setUp() public {
         coord = new MockCoordSub();
-        impl = new Pool(address(coord), bytes32(0), 5);
+        impl = new MegaPool(address(coord), bytes32(0), 5);
         mgr = new PoolManager(address(this), address(0x7EA), address(impl), address(coord), 5);
     }
 
@@ -55,8 +55,8 @@ contract ManagerTest is Test {
 
     function test_createPoolClonesAndRegisters() public {
         address p = mgr.createPool("WF1", _w(block.timestamp + 2 days), 10 ether, 0);
-        assertEq(Pool(payable(p)).owner(), address(mgr));
-        assertEq(Pool(payable(p)).name(), "Winfall #1");
+        assertEq(MegaPool(payable(p)).owner(), address(mgr));
+        assertEq(MegaPool(payable(p)).name(), "Winfall #1");
         assertEq(IPool(p).getConfig().totalWinners, 2);
         assertTrue(coord.consumer(p));
         assertEq(mgr.winfalls(p).pool, p);
@@ -75,9 +75,9 @@ contract ManagerTest is Test {
         vm.warp(block.timestamp + 2 days);
         uint256 r = mgr.requestWinners(p);
         coord.fulfill(p, r, 3);
-        mgr.releaseVrfConsumer(p);
-        assertFalse(coord.consumer(p));
         IPool(p).pickWinners();
+        mgr.releaseVrfConsumer(p); // only once the draw is final, a MegaPool could still roll over before
+        assertFalse(coord.consumer(p));
         assertEq(IPool(p).distribute(10), 2);
         assertEq(address(0xA11CE).balance + address(0xB0B).balance, 10 ether);
         assertEq(mgr.getPrizePool(p), 0);
@@ -88,7 +88,7 @@ contract ManagerTest is Test {
         mgr.createPool("X", _w(block.timestamp + 1 hours), 0, 0);
         vm.expectRevert(abi.encodeWithSelector(UNKNOWN_POOL.selector, address(0xBAD)));
         mgr.requestWinners(address(0xBAD));
-        Pool other = new Pool(address(coord), bytes32(0), 999);
+        MegaPool other = new MegaPool(address(coord), bytes32(0), 999);
         vm.expectRevert(VRF_CONFIG_MISMATCH.selector);
         mgr.setPoolImplementation(address(other));
         vm.prank(address(0xE71));

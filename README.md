@@ -9,7 +9,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 | Contract | Role |
 |---|---|
 | [`PoolManager`](src/PoolManager.sol) | Creates pools, sells tickets, splits fees and referral cuts, and owns every pool. |
-| [`Pool`](src/Pool.sol) | One lottery round: ERC721 tickets, the pot, the VRF draw, and prize claims. Deployed once as an implementation; every round is a cheap EIP-1167 clone of it. |
+| [`MegaPool`](src/MegaPool.sol) | One lottery: ERC721 tickets, the pot, the VRF draws, and prize claims. The pot can roll over through several rounds, and with a difficulty set a round can end with no winner (see [MegaPool](#megapool-difficulty-and-rollover)). With difficulty `0` and one round, it's a plain single-round lottery. Deployed once as an implementation; every lottery is a cheap EIP-1167 clone of it. |
 | [`PancakeV3Swapper`](src/PancakeV3Swapper.sol) | Finds routes and swaps on PancakeSwap V3. Every pot swap is checked against the route's TWAP. |
 | [`V3TwapOracle`](src/libraries/V3TwapOracle.sol) | Library that reads PancakeSwap V3 pool observations: mean tick, time-weighted liquidity, and quotes along a route. |
 | [`IPool`](src/interface/IPool.sol), [`ISwapper`](src/interface/ISwapper.sol), [`IPoolManager`](src/interface/IPoolManager.sol) | The interfaces the contracts talk through. `IPool` doesn't depend on the randomness source, and `ISwapper` doesn't depend on the DEX, so either side can be replaced. |
@@ -39,11 +39,11 @@ Built with [Foundry](https://book.getfoundry.sh/).
 ## Round lifecycle
 
 1. **Create.** An account with `POOL_CREATOR_ROLE` calls `PoolManager.createPool(symbol, winfall, winfallAmount, threshold)`. The manager clones `Pool`, initializes it with itself as owner, registers the clone as a VRF consumer, and, when the payment token differs from the pot currency, stores a swap route from the swapper.
-2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until `closeTime`. Buyers choose their own ticket numbers; the whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `Pool.ticketExists(id)`.
+2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until `closeTime`. Buyers choose their own ticket numbers; the whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `MegaPool.ticketExists(number)`.
 3. **Request randomness.** After `closeTime`, a pool creator calls `PoolManager.requestWinners(pool)`, which sends one VRF request.
    - If no answer arrives within `VRF_RETRY_DELAY` (10 minutes), the request can be sent again.
    - Earlier requests stay valid, and whichever answer arrives first becomes the seed. A retry therefore can't cancel a seed that is already on its way.
-4. **Draw.** Once the seed has arrived, anyone calls `Pool.pickWinners()`. It uses a partial Fisher-Yates shuffle over ticket indexes, so every winner is a different ticket. Gas grows with the number of winners, not the number of tickets, and the full ticket list is never copied.
+4. **Draw.** Once the seed has arrived, anyone calls `MegaPool.pickWinners()`. It uses a partial Fisher-Yates shuffle over ticket indexes, so every winner is a different ticket. Gas grows with the number of winners, not the number of tickets, and the full ticket list is never copied.
 5. **Pay out.**
    - The first `claim` or `distribute` records the pot size (`potSnapshot`). Money added after that doesn't change any prize.
    - Winner `i` receives `potSnapshot * winnerShares[i] / sum(shares of drawn winners)`. If fewer tickets sold than there are prize positions, the unused shares are split among the actual winners.
@@ -52,6 +52,21 @@ Built with [Foundry](https://book.getfoundry.sh/).
 6. **Clean up.**
    - `PoolManager.releaseVrfConsumer(pool)` frees the pool's slot on the VRF subscription.
    - Once every winner has claimed, the admin can recover leftover dust or late top-ups with `rescuePoolFunds`.
+
+## MegaPool: difficulty and rollover
+
+Every winfall is a `MegaPool`. Its `difficultyBps`, `totalRounds` and `roundDuration` come from the `Winfall` passed to `createPool`.
+
+- **Ticket numbers:** buyers still choose them. At purchase the contract combines the chosen number with the round that's open, so ticket `number` bought in round `r` becomes NFT id `(r << 128) | number` (`ticketId`, `decodeTicket`). The same number can be bought again in a later round without colliding.
+- **Metadata:** `tokenURI` is `<baseURI>/<pool>/ticket/<round>/<number>`, so wallets and the metadata server see the round and the picked number rather than the packed id.
+- **Old tickets aren't burned:** tickets from rounds without a winner stay with their holders. They just can't win, because each draw only picks from its own round's tickets.
+
+- **Difficulty:** `difficultyBps` is the chance that a draw position misses. A draw picks from the round's tickets plus enough tickets nobody holds to make that share of picks miss: `tickets / (1 - difficulty)` slots in total. With `0`, every position is won.
+- **Rounds:** `currentRound` starts at 1 and goes up to `totalRounds`. Each round sells its own tickets.
+- **No winner:** the pot stays in the MegaPool and the next round opens for `roundDuration`, with its ticket sales adding to the pot. A round that sold nothing rolls over straight away when `requestWinners` is called, without a VRF request.
+- **Winners:** the first round with at least one winner ends the MegaPool and pays out the whole pot, split by the shares of the positions that were won.
+- **Last round:** difficulty is ignored, so the pot is always won as long as the round sold a ticket. If the last round sold nothing, the MegaPool ends with no winners and the admin can rescue the pot.
+- **Old draws can't carry over:** a VRF answer for an earlier round, including a late retry, is ignored and can't seed a later round.
 
 ## Buying tickets
 
@@ -109,7 +124,7 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 
 ## Deployment checklist (BNB Chain)
 
-1. **Pool implementation:** deploy `Pool(vrfCoordinator, keyHash, subscriptionId)`. The VRF settings are immutable in its code and shared by every clone.
+1. **Pool implementation:** deploy `MegaPool(vrfCoordinator, keyHash, subscriptionId)`. The VRF settings are immutable in its code and shared by every clone.
 2. **Swapper:** deploy `PancakeV3Swapper(owner, smartRouter, v3Factory, WBNB, hubs)`, for example with `hubs = [WBNB, USDT]`.
 3. **Manager:** deploy `PoolManager(admin, feeTreasury, poolImplementation, vrfCoordinator, subscriptionId)`, then call `setSwapper(swapper)`.
 4. **VRF subscription:** transfer ownership of the Chainlink VRF subscription to `PoolManager`, which needs it to add and remove each pool as a consumer. Keep the subscription funded, because an underfunded subscription stalls the draw.

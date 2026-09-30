@@ -3,7 +3,7 @@ pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Pool} from "../src/Pool.sol";
+import {MegaPool} from "../src/MegaPool.sol";
 import "../src/PoolManager.sol";
 import {PancakeV3Swapper, INVALID_TWAP_WINDOW, INVALID_SLIPPAGE} from "../src/PancakeV3Swapper.sol";
 import {ISwapper} from "../src/interface/ISwapper.sol";
@@ -20,7 +20,7 @@ contract Tok is ERC20 {
 }
 
 /// observe() as if the pool sat at `tick` with `liquidity` for its whole history
-contract MockV3Pool {
+contract MockV3MegaPool {
     int24 public tick;
     uint128 public liquidity = 1e20;
     bool public tooYoung;
@@ -115,9 +115,9 @@ contract SwapTest is Test {
     Tok doge;
     MockFactory factory;
     MockRouter router;
-    MockV3Pool btcPool;
-    MockV3Pool bnbPool;
-    MockV3Pool bnbBtcPool;
+    MockV3MegaPool btcPool;
+    MockV3MegaPool bnbPool;
+    MockV3MegaPool bnbBtcPool;
     PancakeV3Swapper swapper;
     PoolManager mgr;
     address ref = address(0x5E5);
@@ -135,9 +135,9 @@ contract SwapTest is Test {
         doge = new Tok("DOGE");
         factory = new MockFactory();
         router = new MockRouter();
-        btcPool = new MockV3Pool();
-        bnbPool = new MockV3Pool();
-        bnbBtcPool = new MockV3Pool();
+        btcPool = new MockV3MegaPool();
+        bnbPool = new MockV3MegaPool();
+        bnbBtcPool = new MockV3MegaPool();
         // btc = 60000 usdt, bnb = 600 usdt -> 1 btc = 100 bnb
         btcPool.set(_tick(address(btc), address(usdt), 110026, -110027));
         bnbPool.set(_tick(address(wbnb), address(usdt), 63972, -63973));
@@ -151,7 +151,7 @@ contract SwapTest is Test {
         swapper = new PancakeV3Swapper(address(this), address(router), address(factory), address(wbnb), hubs);
 
         MockCoordSub coord = new MockCoordSub();
-        Pool impl = new Pool(address(coord), bytes32(0), 5);
+        MegaPool impl = new MegaPool(address(coord), bytes32(0), 5);
         mgr = new PoolManager(address(this), treasury, address(impl), address(coord), 5);
         mgr.setSwapper(address(swapper));
         router.setRate(address(usdt), address(btc), 1, 60000);
@@ -192,7 +192,7 @@ contract SwapTest is Test {
     }
 
     function test_picksFeeTierWithMostTimeWeightedLiquidity() public {
-        MockV3Pool deep = new MockV3Pool();
+        MockV3MegaPool deep = new MockV3MegaPool();
         deep.set(btcPool.tick());
         deep.setLiquidity(1e24);
         factory.add(address(usdt), address(btc), 2500, address(deep));
@@ -202,7 +202,7 @@ contract SwapTest is Test {
     }
 
     function test_skipsPoolsTooYoungForWindow() public {
-        MockV3Pool young = new MockV3Pool();
+        MockV3MegaPool young = new MockV3MegaPool();
         young.set(btcPool.tick());
         young.setLiquidity(1e30);
         young.setTooYoung(true);
@@ -276,7 +276,7 @@ contract SwapTest is Test {
 
     function test_refreshRoute() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
-        MockV3Pool deep = new MockV3Pool();
+        MockV3MegaPool deep = new MockV3MegaPool();
         deep.set(btcPool.tick());
         deep.setLiquidity(1e24);
         factory.add(address(usdt), address(btc), 2500, address(deep));
@@ -308,7 +308,7 @@ contract SwapTest is Test {
     function test_swapperNeededForCrossCurrencyPools() public {
         MockCoordSub coord = new MockCoordSub();
         PoolManager bare = new PoolManager(
-            address(this), treasury, address(new Pool(address(coord), bytes32(0), 5)), address(coord), 5
+            address(this), treasury, address(new MegaPool(address(coord), bytes32(0), 5)), address(coord), 5
         );
         vm.expectRevert(SWAPPER_NOT_SET.selector);
         bare.createPool("X", _w(address(usdt), address(btc)), 0, 0);
@@ -328,7 +328,7 @@ contract SwapTest is Test {
         assertEq(usdt.balanceOf(treasury), 10e18);
         assertEq(mgr.referralEarnings(ref, address(usdt)), 20e18);
         assertEq(btc.balanceOf(p), uint256(170e18) / 60000);
-        assertEq(Pool(payable(p)).ownerOf(1), buyer);
+        assertEq(MegaPool(payable(p)).ownerOf((1 << 128) | 1), buyer);
         _assertNothingLeft();
     }
 
@@ -352,7 +352,7 @@ contract SwapTest is Test {
 
     function test_twoHopExactOutUsesReversedPath() public {
         address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)), 0, 0);
-        MockV3Pool dogePool = new MockV3Pool();
+        MockV3MegaPool dogePool = new MockV3MegaPool();
         factory.add(address(doge), address(wbnb), 10000, address(dogePool));
         router.setRate(address(doge), address(usdt), 1, 10); // 1 doge = 0.1 usdt
         doge.mint(buyer, 10_000e18);

@@ -16,8 +16,14 @@ struct Winfall {
     /// cut of every ticket for the buyer's referrer, in basis points (10_000 = 100%). goes to the pot when the buyer
     /// has no referrer
     uint16 referralBps;
+    /// chance that a draw position has no winner, in bps (0 = every position is won)
     uint16 difficultyBps;
+    /// first round's close time
     uint256 closeTime;
+    /// MegaPool: rounds the pot can roll over through, the last one ignores difficulty (0 or 1 = single round)
+    uint32 totalRounds;
+    /// MegaPool: length of every round after the first
+    uint256 roundDuration;
     uint256[] winningShares;
 }
 

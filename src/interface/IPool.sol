@@ -14,7 +14,14 @@ interface IPool {
         address currency;
         uint256 winfallAmount;
         uint256 threshold;
+        /// first (or only) round's close time
         uint256 closeTime;
+        /// chance that a draw position has no winner, in bps (0 = every position is won)
+        uint16 difficultyBps;
+        /// rounds the pot can roll over through before the last, guaranteed round (0 or 1 = single round)
+        uint32 totalRounds;
+        /// length of every round after the first
+        uint256 roundDuration;
     }
 
     error POOL_CLOSED();
@@ -24,6 +31,7 @@ interface IPool {
     error RANDOMNESS_PENDING();
     error WINNERS_ALREADY_PICKED();
     error INVALID_WINNER_SHARES();
+    error INVALID_ROUNDS();
     error WINNERS_NOT_PICKED();
     error NOT_TICKET_OWNER();
     error ALREADY_CLAIMED(uint256 index);
