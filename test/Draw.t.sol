@@ -58,7 +58,7 @@ contract DrawTest is Test {
         (, uint256[] memory w,) = _drawn(tickets, winnersN, seed);
         uint256[] memory all = new uint256[](tickets);
         for (uint256 i; i < tickets; i++) {
-            all[i] = (1 << 128) | ((i + 1) * 7); // round 1 nft ids
+            all[i] = 1_000_000_000 + (i + 1) * 7; // round 1 nft ids
         }
         uint256 count = winnersN > tickets ? tickets : winnersN;
         uint256[] memory ref = _reference(all, count, seed);

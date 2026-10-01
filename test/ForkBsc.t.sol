@@ -90,7 +90,7 @@ contract ForkBscTest is Test {
         assertEq(mgr.referralEarnings(ref, USDT), 20e18);
         assertEq(IERC20(USDT).balanceOf(address(mgr)), 20e18);
         assertEq(IERC20(USDT).balanceOf(address(swapper)), 0);
-        assertEq(MegaPool(payable(p)).ownerOf((1 << 128) | 2), buyer);
+        assertEq(MegaPool(payable(p)).ownerOf(1_000_000_000 + 2), buyer);
     }
 
     function test_fork_buyWithNativeBnbIntoBtcbPot() public {

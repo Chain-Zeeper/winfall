@@ -83,6 +83,8 @@ contract MegaPoolTest is Test {
         m.safeMint(address(0xB0B0), 7);
         assertEq(m.ownerOf(m.ticketId(1, 7)), address(0xA11CE));
         assertEq(m.ownerOf(m.ticketId(2, 7)), address(0xB0B0));
+        assertEq(m.ticketId(2, 7), 2000000007); // readable: round, then the 9 digit ticket number
+        assertEq(m.ticketId(12, 123456), 12000123456);
         (uint256 round, uint256 number) = m.decodeTicket(m.ticketId(2, 7));
         assertEq(round, 2);
         assertEq(number, 7);
@@ -144,6 +146,15 @@ contract MegaPoolTest is Test {
         emit MegaPool.LateFulfillmentIgnored(retry);
         coord.fulfill(address(m), retry, 0); // round 1's retry answering late can't seed round 2
         assertFalse(m.roundFulfilled(2));
+    }
+
+    function test_ticketNumbersAreCapped() public {
+        MegaPool m = _mega(0, 1, 1);
+        m.safeMint(address(0xA11CE), 999_999_999); // largest number
+        assertEq(m.ownerOf(1_999_999_999), address(0xA11CE));
+        vm.expectRevert(abi.encodeWithSelector(MegaPool.TICKET_NUMBER_TOO_LARGE.selector, 1_000_000_000));
+        m.safeMint(address(0xA11CE), 1_000_000_000); // would read as round 2, ticket 0
+        assertFalse(m.ticketExists(1_000_000_000));
     }
 
     function test_cantDrawTwiceOrAfterEnd() public {

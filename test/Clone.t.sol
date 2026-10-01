@@ -36,7 +36,7 @@ contract CloneTest is Test {
         p.initialize(address(this), "X", "X", cfg);
         vm.prank(address(0xABC)); // new owner works
         p.safeMint(address(1), 1);
-        assertEq(p.ownerOf((1 << 128) | 1), address(1));
+        assertEq(p.ownerOf(1_000_000_000 + 1), address(1));
     }
 
     function test_zeroOwnerRejected() public {

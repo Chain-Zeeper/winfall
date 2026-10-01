@@ -57,7 +57,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 
 Every winfall is a `MegaPool`. Its `difficultyBps`, `totalRounds` and `roundDuration` come from the `Winfall` passed to `createPool`.
 
-- **Ticket numbers:** buyers still choose them. At purchase the contract combines the chosen number with the round that's open, so ticket `number` bought in round `r` becomes NFT id `(r << 128) | number` (`ticketId`, `decodeTicket`). The same number can be bought again in a later round without colliding.
+- **Ticket numbers:** buyers still choose them. At purchase the contract combines the chosen number with the round that's open, so ticket `number` bought in round `r` becomes NFT id `r × 1,000,000,000 + number` (`ticketId`, `decodeTicket`). The id reads as the round followed by a 9-digit ticket number, so round 2, ticket 7 is `2000000007`, and ticket numbers must be below 1,000,000,000. The same number can be bought again in a later round without colliding.
 - **Metadata:** `tokenURI` is `<baseURI>/<pool>/ticket/<round>/<number>`, so wallets and the metadata server see the round and the picked number rather than the packed id.
 - **Old tickets aren't burned:** tickets from rounds without a winner stay with their holders. They just can't win, because each draw only picks from its own round's tickets.
 
@@ -160,8 +160,8 @@ BSC_RPC_URL=<rpc url> BSC_FORK_BLOCK=<block> forge test --match-contract ForkBsc
 ```
 
 - `BSC_RPC_URL` defaults to a public node.
-- Public nodes sometimes fail with "block not found" on the newest block, so pin `BSC_FORK_BLOCK` to a block slightly behind the tip.
-- Use a private RPC for runs you need to repeat exactly.
+- **Public nodes:** leave `BSC_FORK_BLOCK` unset so the tests use the latest block. Public nodes only keep recent state, and BNB Chain's blocks are fast enough that a pinned block ages out during a run ("missing trie node" or "archive requests require a token"). If a run fails with an RPC error such as "block not found", run it again.
+- **Pinned blocks:** set `BSC_FORK_BLOCK` only with a private or archive RPC. That's what you need for runs you can repeat exactly.
 - CI skips the fork tests (`--no-match-contract ForkBscTest`) because public RPCs are unreliable; run them locally.
 
 **Why `TickMath` comes from Uniswap:** PancakeSwap's own `TickMath` is pinned to Solidity `<0.8`, so `V3TwapOracle` uses Uniswap's 0.8 port instead. Its constants and logic are identical to PancakeSwap's. All other DEX interfaces come from `pancake-v3-contracts`.

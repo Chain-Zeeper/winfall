@@ -77,7 +77,7 @@ contract BuyTest is Test {
         assertEq(mgr.referralEarnings(ref, address(0)), 0.3 ether);
         assertEq(p.balance, 2.55 ether);
         assertEq(address(mgr).balance, 0.3 ether); // referral earnings wait to be claimed
-        assertEq(MegaPool(payable(p)).ownerOf((1 << 128) | 777), buyer);
+        assertEq(MegaPool(payable(p)).ownerOf(1_000_000_000 + 777), buyer);
         assertEq(MegaPool(payable(p)).ticketsMinted(), 3);
     }
 

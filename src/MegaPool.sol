@@ -18,7 +18,7 @@ import {IPool} from "./interface/IPool.sol";
 ///         pays out the whole pot and ends the MegaPool. the last round ignores difficulty, so it always has winners
 ///         (as long as it sold a ticket).
 /// @dev cloned by PoolManager like Pool. ticket numbers restart every round, so the nft id of ticket `number` in
-///      round `r` is (r << 128) | number, see ticketId(). the IPool functions that take a ticket id (safeMint,
+///      round `r` is r * TICKET_ID_ROUND_MULTIPLIER + number, see ticketId(). the IPool functions that take a ticket id (safeMint,
 ///      ticketExists) take the plain number of the current round.
 contract MegaPool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     using Strings for address;
@@ -39,6 +39,9 @@ contract MegaPool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     event RoundWon(uint256 indexed round, uint256 winners);
 
     uint16 public constant BPS = 10_000;
+    /// nft id = round * this + ticket number, so the id reads as the round followed by a 9 digit ticket number
+    /// (round 2, ticket 7 = 2000000007). ticket numbers have to be below it
+    uint256 public constant TICKET_ID_ROUND_MULTIPLIER = 1_000_000_000;
 
     // chainlink vrf v2.5, set on the implementation and shared by its clones
     IVRFCoordinatorV2Plus public immutable VRF_COORDINATOR;
@@ -148,7 +151,7 @@ contract MegaPool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     /// @param number ticket number in the current round, the nft minted is ticketId(currentRound, number)
     function safeMint(address to, uint256 number) public onlyOwner {
         require(isOpen(), POOL_CLOSED());
-        require(number <= type(uint128).max, TICKET_NUMBER_TOO_LARGE(number));
+        require(number < TICKET_ID_ROUND_MULTIPLIER, TICKET_NUMBER_TOO_LARGE(number));
         uint256 id = ticketId(currentRound, number);
         require(_ownerOf(id) == address(0), TICKET_TAKEN(number));
         _safeMint(to, id);
@@ -158,17 +161,17 @@ contract MegaPool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
 
     /// @notice nft id of ticket `number` in `round`
     function ticketId(uint256 round, uint256 number) public pure returns (uint256) {
-        return (round << 128) | number;
+        return round * TICKET_ID_ROUND_MULTIPLIER + number;
     }
 
     /// @notice round and ticket number of an nft id
     function decodeTicket(uint256 id) public pure returns (uint256 round, uint256 number) {
-        return (id >> 128, uint256(uint128(id)));
+        return (id / TICKET_ID_ROUND_MULTIPLIER, id % TICKET_ID_ROUND_MULTIPLIER);
     }
 
     /// @notice true if ticket `number` of the current round is already sold
     function ticketExists(uint256 number) public view returns (bool) {
-        return number <= type(uint128).max && _ownerOf(ticketId(currentRound, number)) != address(0);
+        return number < TICKET_ID_ROUND_MULTIPLIER && _ownerOf(ticketId(currentRound, number)) != address(0);
     }
 
     function roundTickets(uint256 round) external view returns (uint256[] memory) {

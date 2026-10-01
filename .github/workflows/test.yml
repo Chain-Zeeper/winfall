@@ -35,6 +35,6 @@ jobs:
         run: forge build --sizes
 
       # fork tests (ForkBscTest) need a bnb chain rpc and are flaky on public nodes, run them locally:
-      # BSC_RPC_URL=<rpc> BSC_FORK_BLOCK=<block> forge test --match-contract ForkBscTest
+      # BSC_RPC_URL=<rpc> forge test --match-contract ForkBscTest
       - name: Run Forge tests
         run: forge test -vvv --no-match-contract ForkBscTest

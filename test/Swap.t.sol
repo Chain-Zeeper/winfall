@@ -328,7 +328,7 @@ contract SwapTest is Test {
         assertEq(usdt.balanceOf(treasury), 10e18);
         assertEq(mgr.referralEarnings(ref, address(usdt)), 20e18);
         assertEq(btc.balanceOf(p), uint256(170e18) / 60000);
-        assertEq(MegaPool(payable(p)).ownerOf((1 << 128) | 1), buyer);
+        assertEq(MegaPool(payable(p)).ownerOf(1_000_000_000 + 1), buyer);
         _assertNothingLeft();
     }
 
