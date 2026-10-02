@@ -16,15 +16,13 @@ struct Winfall {
     /// cut of every ticket for the buyer's referrer, in basis points (10_000 = 100%). goes to the pot when the buyer
     /// has no referrer
     uint16 referralBps;
-    /// chance that a draw position has no winner, in bps (0 = every position is won)
-    uint16 difficultyBps;
-    /// first round's close time
+    /// tickets are sold until then
     uint256 closeTime;
-    /// MegaPool: rounds the pot can roll over through, the last one ignores difficulty (0 or 1 = single round)
-    uint32 totalRounds;
-    /// MegaPool: length of every round after the first
-    uint256 roundDuration;
+    /// winningShares[i] is the cut of the pot prize position i wins, in bps. they have to add up to 10_000
     uint256[] winningShares;
+    /// difficultiesBps[i] is the chance that position i has no winner, in bps (0 = always won, at most 9_000). its share then
+    /// stays in the pool until it's rolled over into another pool. empty = every position is always won
+    uint16[] difficultiesBps;
 }
 
 interface IPoolManager {
@@ -39,4 +37,5 @@ interface IPoolManager {
         address referrer
     ) external payable;
     function claimReferral(address token) external returns (uint256 amount);
+    function rollover(address fromPool, address toPool) external returns (uint256 amount);
 }

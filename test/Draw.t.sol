@@ -1,30 +1,33 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
-import "../src/MegaPool.sol";
+import "../src/Pool.sol";
 import {IPool} from "../src/interface/IPool.sol";
 import {PoolClone} from "./PoolClone.sol";
 import {MockCoord} from "./Retry.t.sol";
 
 contract DrawTest is Test {
     MockCoord coord;
-    MegaPool impl;
+    Pool impl;
 
     function setUp() public {
         coord = new MockCoord();
-        impl = new MegaPool(address(coord), bytes32(0), 1);
+        impl = new Pool(address(coord), bytes32(0), 1);
     }
 
     function _drawn(uint256 tickets, uint256 winnersN, uint256 seed)
         internal
-        returns (MegaPool p, uint256[] memory w, uint256 gasUsed)
+        returns (Pool p, uint256[] memory w, uint256 gasUsed)
     {
         uint256[] memory shares = new uint256[](winnersN);
         for (uint256 i; i < winnersN; i++) {
-            shares[i] = 1;
+            shares[i] = 10_000 / winnersN;
         }
+        shares[0] += 10_000 % winnersN; // shares have to add up to 10_000
         p = PoolClone.make(
-            impl, address(this), IPool.PoolConfig(winnersN, shares, address(0), 0, 0, block.timestamp + 1 days, 0, 0, 0)
+            impl,
+            address(this),
+            IPool.PoolConfig(winnersN, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days)
         );
         // non sequential ids
         for (uint256 i = 1; i <= tickets; i++) {
@@ -58,7 +61,7 @@ contract DrawTest is Test {
         (, uint256[] memory w,) = _drawn(tickets, winnersN, seed);
         uint256[] memory all = new uint256[](tickets);
         for (uint256 i; i < tickets; i++) {
-            all[i] = 1_000_000_000 + (i + 1) * 7; // round 1 nft ids
+            all[i] = (i + 1) * 7;
         }
         uint256 count = winnersN > tickets ? tickets : winnersN;
         uint256[] memory ref = _reference(all, count, seed);

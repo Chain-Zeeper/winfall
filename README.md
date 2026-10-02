@@ -9,7 +9,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 | Contract | Role |
 |---|---|
 | [`PoolManager`](src/PoolManager.sol) | Creates pools, sells tickets, splits fees and referral cuts, and owns every pool. |
-| [`MegaPool`](src/MegaPool.sol) | One lottery: ERC721 tickets, the pot, the VRF draws, and prize claims. The pot can roll over through several rounds, and with a difficulty set a round can end with no winner (see [MegaPool](#megapool-difficulty-and-rollover)). With difficulty `0` and one round, it's a plain single-round lottery. Deployed once as an implementation; every lottery is a cheap EIP-1167 clone of it. |
+| [`Pool`](src/Pool.sol) | One lottery: ERC721 tickets, the pot, the VRF draw, prize claims, and the rollover of prizes nobody won. Deployed once as an implementation; every lottery is a cheap EIP-1167 clone of it. |
 | [`PancakeV3Swapper`](src/PancakeV3Swapper.sol) | Finds routes and swaps on PancakeSwap V3. Every pot swap is checked against the route's TWAP. |
 | [`V3TwapOracle`](src/libraries/V3TwapOracle.sol) | Library that reads PancakeSwap V3 pool observations: mean tick, time-weighted liquidity, and quotes along a route. |
 | [`IPool`](src/interface/IPool.sol), [`ISwapper`](src/interface/ISwapper.sol), [`IPoolManager`](src/interface/IPoolManager.sol) | The interfaces the contracts talk through. `IPool` doesn't depend on the randomness source, and `ISwapper` doesn't depend on the DEX, so either side can be replaced. |
@@ -36,37 +36,35 @@ Built with [Foundry](https://book.getfoundry.sh/).
   Chainlink VRF ------------- random seed ------------------------+
 ```
 
-## Round lifecycle
+## Pool lifecycle
 
 1. **Create.** An account with `POOL_CREATOR_ROLE` calls `PoolManager.createPool(symbol, winfall, winfallAmount, threshold)`. The manager clones `Pool`, initializes it with itself as owner, registers the clone as a VRF consumer, and, when the payment token differs from the pot currency, stores a swap route from the swapper.
-2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until `closeTime`. Buyers choose their own ticket numbers; the whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `MegaPool.ticketExists(number)`.
+2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until the pool's `closeTime`. Buyers choose their own ticket numbers, and the ticket's NFT id is that number. The whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `Pool.ticketExists(id)`.
 3. **Request randomness.** After `closeTime`, a pool creator calls `PoolManager.requestWinners(pool)`, which sends one VRF request.
    - If no answer arrives within `VRF_RETRY_DELAY` (10 minutes), the request can be sent again.
    - Earlier requests stay valid, and whichever answer arrives first becomes the seed. A retry therefore can't cancel a seed that is already on its way.
-4. **Draw.** Once the seed has arrived, anyone calls `MegaPool.pickWinners()`. It uses a partial Fisher-Yates shuffle over ticket indexes, so every winner is a different ticket. Gas grows with the number of winners, not the number of tickets, and the full ticket list is never copied.
+   - A pool that sold no tickets needs no draw: it's marked as drawn without winners straight away.
+4. **Draw.** Once the seed has arrived, anyone calls `Pool.pickWinners()`. Each prize position first misses with its own difficulty (see below); otherwise it wins a ticket that hasn't won yet, picked with a partial Fisher-Yates shuffle over ticket indexes. Gas grows with the number of winners, not the number of tickets, and the full ticket list is never copied.
 5. **Pay out.**
-   - The first `claim` or `distribute` records the pot size (`potSnapshot`). Money added after that doesn't change any prize.
-   - Winner `i` receives `potSnapshot * winnerShares[i] / sum(shares of drawn winners)`. If fewer tickets sold than there are prize positions, the unused shares are split among the actual winners.
-   - `claim(index)`: the current holder of the winning ticket pulls their prize.
+   - The first `claim`, `distribute` or `rollover` records the pot size (`potSnapshot`). Money added after that doesn't change any amount.
+   - `Pool.pot()` and `PoolManager.getPrizePool(pool)` return the live balance until that snapshot, and the snapshot from then on, so the reported pot doesn't shrink as prizes are paid.
+   - The winner of position `i` receives `potSnapshot * winnerShares[i] / 10_000`. The shares are the prize split in basis points and must add up to exactly 10,000, so `[5000, 3000, 2000]` is 50% / 30% / 20%.
+   - `claim(index)`: the current holder of the winning ticket pulls their prize. `index` is the winner's place in `getWinners()`, not the prize position.
+   - Views for frontends: `winnersInfo()` returns every winner's ticket, prize position, holder, prize and claim status in one call. The holder is the ticket's current owner until the prize is claimed, and the address that was paid (`prizePaidTo`) after that. `prizes()` gives what each position pays, using the current pot before the snapshot.
    - `distribute(maxWinners)`: anyone can push prizes in batches. A failed transfer is skipped instead of reverting, and that winner can still `claim`.
-6. **Clean up.**
-   - `PoolManager.releaseVrfConsumer(pool)` frees the pool's slot on the VRF subscription.
-   - Once every winner has claimed, the admin can recover leftover dust or late top-ups with `rescuePoolFunds`.
+6. **Roll over.** The shares of the positions nobody won stay in the pool until a pool creator calls `PoolManager.rollover(fromPool, toPool)` (see below). Winners don't have to wait for it.
+7. **Clean up.**
+   - `PoolManager.releaseVrfConsumer(pool)` frees the pool's slot on the VRF subscription once the draw is done.
+   - Once every winner has been paid and the unwon share has been rolled over, the admin can recover leftover dust or late top-ups with `rescuePoolFunds`.
 
-## MegaPool: difficulty and rollover
+## Difficulty and rollover
 
-Every winfall is a `MegaPool`. Its `difficultyBps`, `totalRounds` and `roundDuration` come from the `Winfall` passed to `createPool`.
-
-- **Ticket numbers:** buyers still choose them. At purchase the contract combines the chosen number with the round that's open, so ticket `number` bought in round `r` becomes NFT id `r × 1,000,000,000 + number` (`ticketId`, `decodeTicket`). The id reads as the round followed by a 9-digit ticket number, so round 2, ticket 7 is `2000000007`, and ticket numbers must be below 1,000,000,000. The same number can be bought again in a later round without colliding.
-- **Metadata:** `tokenURI` is `<baseURI>/<pool>/ticket/<round>/<number>`, so wallets and the metadata server see the round and the picked number rather than the packed id.
-- **Old tickets aren't burned:** tickets from rounds without a winner stay with their holders. They just can't win, because each draw only picks from its own round's tickets.
-
-- **Difficulty:** `difficultyBps` is the chance that a draw position misses. A draw picks from the round's tickets plus enough tickets nobody holds to make that share of picks miss: `tickets / (1 - difficulty)` slots in total. With `0`, every position is won.
-- **Rounds:** `currentRound` starts at 1 and goes up to `totalRounds`. Each round sells its own tickets.
-- **No winner:** the pot stays in the MegaPool and the next round opens for `roundDuration`, with its ticket sales adding to the pot. A round that sold nothing rolls over straight away when `requestWinners` is called, without a VRF request.
-- **Winners:** the first round with at least one winner ends the MegaPool and pays out the whole pot, split by the shares of the positions that were won.
-- **Last round:** difficulty is ignored, so the pot is always won as long as the round sold a ticket. If the last round sold nothing, the MegaPool ends with no winners and the admin can rescue the pot.
-- **Old draws can't carry over:** a VRF answer for an earlier round, including a late retry, is ignored and can't seed a later round.
+- **Difficulty per prize position:** `difficultiesBps[i]` is the chance, in basis points, that position `i` has no winner. `[9000, 5000, 0]` makes 1st place miss 90% of the time, 2nd place 50%, and 3rd place always won. An empty list means every position is always won. The cap is 9,000 (`MAX_DIFFICULTY_BPS`), so every position has at least a 10% chance of being won.
+- **Too few tickets:** a position also has no winner when there are fewer tickets than positions.
+- **Unwon shares aren't split among the winners.** Each winner gets exactly their own position's share. The rest, `potSnapshot * unwon shares / 10_000`, is what `rolloverAmount()` reports.
+- **Rollover moves that money from pool to pool:** `PoolManager.rollover(fromPool, toPool)` sends it straight into `toPool`'s pot. `toPool` must be another pool of this manager with the same pot currency that hasn't been drawn yet. It can't go to a wallet, and it can only be done once per pool.
+- **The admin can't take the unwon share.** `rescuePoolFunds` refuses the pot currency until every winner is paid and the rest has been rolled over. There is no way to withdraw a pot, including one the operator seeded, except through prizes.
+- **A jackpot ends with a guaranteed pool:** to make sure a rolled-over pot is finally paid, the operator creates a pool with no difficulties and rolls into it. That is operator policy; the contracts don't force it.
 
 ## Buying tickets
 
@@ -116,7 +114,7 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 | Who | Can do |
 |---|---|
 | `DEFAULT_ADMIN_ROLE` on `PoolManager` | Grant and revoke roles; `setPoolImplementation`, `setSwapper`, `setFeeTreasury`, `rescuePoolFunds`. |
-| `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
+| `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `rollover`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
 | Owner of `PancakeV3Swapper` | `setHubs`, `setTwapWindow` (5 minutes to 1 day), `setMaxSlippage` (at most 10%). |
 | Anyone | Buy tickets, `pickWinners`, `distribute`; winners `claim`; referrers `claimReferral`. |
 
@@ -124,7 +122,7 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 
 ## Deployment checklist (BNB Chain)
 
-1. **Pool implementation:** deploy `MegaPool(vrfCoordinator, keyHash, subscriptionId)`. The VRF settings are immutable in its code and shared by every clone.
+1. **Pool implementation:** deploy `Pool(vrfCoordinator, keyHash, subscriptionId)`. The VRF settings are immutable in its code and shared by every clone.
 2. **Swapper:** deploy `PancakeV3Swapper(owner, smartRouter, v3Factory, WBNB, hubs)`, for example with `hubs = [WBNB, USDT]`.
 3. **Manager:** deploy `PoolManager(admin, feeTreasury, poolImplementation, vrfCoordinator, subscriptionId)`, then call `setSwapper(swapper)`.
 4. **VRF subscription:** transfer ownership of the Chainlink VRF subscription to `PoolManager`, which needs it to add and remove each pool as a consumer. Keep the subscription funded, because an underfunded subscription stalls the draw.
@@ -168,6 +166,7 @@ BSC_RPC_URL=<rpc url> BSC_FORK_BLOCK=<block> forge test --match-contract ForkBsc
 
 ## Known limitations
 - **No refund if randomness never arrives.** If no VRF answer ever arrives, the pot stays in the pool.
+- **A rollover needs a target pool.** The unwon share stays in the finished pool until a pool with the same pot currency exists and someone with the creator role rolls it over.
 - **Buying many tickets at once can run out of gas.** There's no limit per transaction, and each ticket costs about 50k gas.
 - **Routing is simple.** A direct pool is always preferred over a route through a hub, even if the direct pool is much shallower. Call `findRoute` before creating a pool to see which route it will use.
 - **PancakeSwap Infinity (V4) isn't supported.** If liquidity moves there, write a new `ISwapper` implementation and switch to it with `setSwapper`. Infinity pools have no built-in TWAP, so the new swapper needs another price source.

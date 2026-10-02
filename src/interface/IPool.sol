@@ -2,41 +2,59 @@
 pragma solidity ^0.8.36;
 
 /// @notice the essentials every winfall pool implements, whatever its randomness source (chainlink vrf or other).
-///         PoolManager clones a pool per round and owns it. source specific parts (vrf callback, request ids,
+///         PoolManager clones a pool per lottery and owns it. source specific parts (vrf callback, request ids,
 ///         retries) and cosmetics (metadata uri) live on the implementation, not here.
 /// @dev struct, errors and events live inside the interface so they don't clash with PoolManager's own Winfall / errors
 interface IPool {
     struct PoolConfig {
         uint256 totalWinners;
-        /// winnerShares[i] is the weight of draw position i, any unit (payout = pot * share / sum of drawn shares)
+        /// winnerShares[i] is the cut of the pot prize position i wins, in bps. they have to add up to 10_000
         uint256[] winnerShares;
+        /// difficultiesBps[i] is the chance that position i has no winner, in bps (0 = always won, at most 9_000).
+        /// empty = every position is always won
+        uint16[] difficultiesBps;
         /// address(0) = native eth
         address currency;
         uint256 winfallAmount;
         uint256 threshold;
-        /// first (or only) round's close time
+        /// tickets are sold until then
         uint256 closeTime;
-        /// chance that a draw position has no winner, in bps (0 = every position is won)
-        uint16 difficultyBps;
-        /// rounds the pot can roll over through before the last, guaranteed round (0 or 1 = single round)
-        uint32 totalRounds;
-        /// length of every round after the first
-        uint256 roundDuration;
     }
 
+    /// one winner: the ticket, the prize position it won (0 = first) and its prize. `holder` is who was paid once
+    /// the prize is claimed, the ticket's current holder before that
+    struct WinnerInfo {
+        uint256 ticketId;
+        uint256 position;
+        address holder;
+        uint256 prize;
+        bool claimed;
+    }
+
+    event WinnersRequestRetried(uint256 indexed oldRequestId, uint256 indexed newRequestId);
+    event RandomnessFulfilled(uint256 indexed requestId, uint256 randomSeed);
+    event LateFulfillmentIgnored(uint256 indexed requestId);
+    /// the share of the positions nobody won moved into pool `to`
+    event RolledOver(address indexed to, uint256 amount);
+
+    error RANDOMNESS_ALREADY_FULFILLED();
+    error ONLY_VRF_COORDINATOR(address caller);
+    error UNKNOWN_VRF_REQUEST(uint256 requestId);
     error POOL_CLOSED();
     error POOL_OPEN();
-    error NO_TICKETS();
     error DRAW_ALREADY_STARTED();
     error RANDOMNESS_PENDING();
     error WINNERS_ALREADY_PICKED();
     error INVALID_WINNER_SHARES();
-    error INVALID_ROUNDS();
+    error INVALID_DIFFICULTIES();
+    error INVALID_CLOSE_TIME();
     error WINNERS_NOT_PICKED();
     error NOT_TICKET_OWNER();
     error ALREADY_CLAIMED(uint256 index);
     error EMPTY_POT();
     error TICKET_TAKEN(uint256 ticketId);
+    error ALREADY_ROLLED_OVER();
+    error NOTHING_TO_ROLL_OVER();
 
     event WinnersRequested(uint256 indexed requestId);
     event WinnersPicked(uint256[] winners);
@@ -57,6 +75,8 @@ interface IPool {
     /// @notice starts the draw after close, how the randomness arrives is up to the implementation
     function requestWinners() external returns (uint256 requestId);
     function rescueFunds(address token, address to, uint256 amount) external;
+    /// @notice sends the share of the positions nobody won to `to` (the next pool), once
+    function rollover(address to) external returns (uint256 amount);
 
     // ---- anyone ----
     function pickWinners() external returns (uint256[] memory);
@@ -70,4 +90,17 @@ interface IPool {
     function getWinners() external view returns (uint256[] memory);
     function winnerAt(uint256 index) external view returns (address);
     function allClaimed() external view returns (bool);
+    /// @notice the prize pot: the pool's balance of the pot currency until the snapshot is taken (first payout or
+    ///         rollover), the snapshot from then on. payouts and later top ups don't change it anymore
+    function pot() external view returns (uint256);
+    /// @notice every winner with its position, holder, prize and claim status, in draw order. winnersInfo()[k]
+    ///         is the winner claim(k) pays
+    function winnersInfo() external view returns (WinnerInfo[] memory);
+    /// @notice what every prize position pays (index 0 = first). uses the pot snapshot once it's taken, the
+    ///         current pot before that
+    function prizes() external view returns (uint256[] memory);
+    /// @notice the draw is done (winners picked, possibly none)
+    function drawn() external view returns (bool);
+    /// @notice what rollover() would move, 0 before the draw or once rolled over
+    function rolloverAmount() external view returns (uint256);
 }

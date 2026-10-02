@@ -2,7 +2,7 @@
 pragma solidity ^0.8.36;
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {MegaPool} from "../src/MegaPool.sol";
+import {Pool} from "../src/Pool.sol";
 import "../src/PoolManager.sol";
 import {PancakeV3Swapper} from "../src/PancakeV3Swapper.sol";
 import {Winfall} from "../src/interface/IPoolManager.sol";
@@ -35,14 +35,14 @@ contract ForkBscTest is Test {
         swapper = new PancakeV3Swapper(address(this), SMART_ROUTER, FACTORY, WBNB, hubs);
         MockCoordSub coord = new MockCoordSub();
         mgr = new PoolManager(
-            address(this), treasury, address(new MegaPool(address(coord), bytes32(0), 5)), address(coord), 5
+            address(this), treasury, address(new Pool(address(coord), bytes32(0), 5)), address(coord), 5
         );
         mgr.setSwapper(address(swapper));
     }
 
     function _pool(address pay, address pot) internal returns (address) {
         uint256[] memory shares = new uint256[](1);
-        shares[0] = 1;
+        shares[0] = 10_000;
         Winfall memory w;
         w.name = "fork";
         w.ticketPrice = 100e18;
@@ -90,7 +90,7 @@ contract ForkBscTest is Test {
         assertEq(mgr.referralEarnings(ref, USDT), 20e18);
         assertEq(IERC20(USDT).balanceOf(address(mgr)), 20e18);
         assertEq(IERC20(USDT).balanceOf(address(swapper)), 0);
-        assertEq(MegaPool(payable(p)).ownerOf(1_000_000_000 + 2), buyer);
+        assertEq(Pool(payable(p)).ownerOf(2), buyer);
     }
 
     function test_fork_buyWithNativeBnbIntoBtcbPot() public {

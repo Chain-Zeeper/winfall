@@ -2,7 +2,7 @@
 pragma solidity ^0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MegaPool} from "../src/MegaPool.sol";
+import {Pool} from "../src/Pool.sol";
 import {IPool} from "../src/interface/IPool.sol";
 import {
     PoolManager,
@@ -31,14 +31,14 @@ contract BuyTest is Test {
 
     function setUp() public {
         coord = new MockCoordSub();
-        MegaPool impl = new MegaPool(address(coord), bytes32(0), 5);
+        Pool impl = new Pool(address(coord), bytes32(0), 5);
         mgr = new PoolManager(address(this), treasury, address(impl), address(coord), 5);
         tok = new Tok();
     }
 
     function _w(address currency, uint256 price, uint16 fee, uint16 res) internal view returns (Winfall memory w) {
         uint256[] memory shares = new uint256[](1);
-        shares[0] = 1;
+        shares[0] = 10_000;
         w.name = "W";
         w.ticketPrice = price;
         w.currency = currency;
@@ -77,8 +77,8 @@ contract BuyTest is Test {
         assertEq(mgr.referralEarnings(ref, address(0)), 0.3 ether);
         assertEq(p.balance, 2.55 ether);
         assertEq(address(mgr).balance, 0.3 ether); // referral earnings wait to be claimed
-        assertEq(MegaPool(payable(p)).ownerOf(1_000_000_000 + 777), buyer);
-        assertEq(MegaPool(payable(p)).ticketsMinted(), 3);
+        assertEq(Pool(payable(p)).ownerOf(777), buyer);
+        assertEq(Pool(payable(p)).ticketsMinted(), 3);
     }
 
     function test_buyTokenSplitsFees() public {
@@ -125,7 +125,7 @@ contract BuyTest is Test {
         address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0), 0, 0);
         vm.prank(buyer);
         vm.expectRevert();
-        MegaPool(payable(p)).safeMint(buyer, 99);
+        Pool(payable(p)).safeMint(buyer, 99);
     }
 
     function test_treasuryAdminOnly() public {
