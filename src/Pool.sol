@@ -2,6 +2,7 @@
 pragma solidity ^0.8.36;
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -16,7 +17,7 @@ import {IPool} from "./interface/IPool.sol";
 ///         chance that nobody wins it. winners are paid their share of the pot, the share of the positions nobody
 ///         won can only leave through rollover() into another pool.
 /// @dev cloned by PoolManager, which owns every pool
-contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
+contract Pool is IPool, ERC721Enumerable, Ownable, ReentrancyGuard, Initializable {
     using Strings for address;
 
     uint16 public constant BPS = 10_000;
@@ -43,8 +44,6 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     uint256 public ticketsSold;
     /// tickets that were given away
     uint256 public ticketsAirdropped;
-    /// bought and airdropped tickets, all of them are in the draw
-    uint256[] public allTickets;
 
     // ---- vrf ----
 
@@ -132,7 +131,6 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         require(_ownerOf(tokenId) == address(0), TICKET_TAKEN(tokenId));
         _safeMint(to, tokenId);
         ticketsSold += 1;
-        allTickets.push(tokenId);
     }
 
     /// @notice mints a free ticket that takes part in the draw like a bought one. the owner (PoolManager) limits how
@@ -142,8 +140,17 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         require(_ownerOf(tokenId) == address(0), TICKET_TAKEN(tokenId));
         _safeMint(to, tokenId);
         ticketsAirdropped += 1;
-        allTickets.push(tokenId);
         emit TicketAirdropped(to, tokenId);
+    }
+
+    /// @notice every ticket id `owner` holds in this pool. for very large holdings page through balanceOf and
+    ///         tokenOfOwnerByIndex instead
+    function ticketsOf(address owner) external view returns (uint256[] memory ids) {
+        uint256 count = balanceOf(owner);
+        ids = new uint256[](count);
+        for (uint256 i = 0; i < count; i++) {
+            ids[i] = tokenOfOwnerByIndex(owner, i);
+        }
     }
 
     /// @notice `ticketId` is already sold (ownerOf reverts for unknown ids, this doesn't)
@@ -171,7 +178,7 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         require(!drawn, WINNERS_ALREADY_PICKED());
         require(!randomnessFulfilled, RANDOMNESS_ALREADY_FULFILLED());
 
-        if (allTickets.length == 0) {
+        if (totalSupply() == 0) {
             drawn = true;
             emit WinnersPicked(winners);
             return 0;
@@ -219,7 +226,8 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         require(!drawn, WINNERS_ALREADY_PICKED());
         drawn = true;
 
-        uint256 total = allTickets.length;
+        // tickets are never burned, so the enumerable list keeps its order: index i is the i-th ticket minted
+        uint256 total = totalSupply();
         uint256 positions = winfall.totalWinners;
         uint256 seed = randomSeed;
         // partial fisher-yates over ticket indexes, only the positions a swap touched are kept in memory
@@ -237,7 +245,7 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
             if (j != hits) {
                 moved = _setIndexAt(j, _indexAt(hits, movedPos, movedVal, moved), movedPos, movedVal, moved);
             }
-            winners.push(allTickets[picked]);
+            winners.push(tokenByIndex(picked));
             winnerPositions.push(i);
             wonShares += winfall.winnerShares[i];
             hits++;
@@ -469,7 +477,7 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     function rescueFunds(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "cannot rescue to zero address");
         if (token == winfall.currency) {
-            require(allTickets.length == 0 || allClaimed(), "pot locked until every winner has claimed");
+            require(totalSupply() == 0 || allClaimed(), "pot locked until every winner has claimed");
         }
 
         if (token == address(0)) {
@@ -490,7 +498,7 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
 
     /// @notice the pool closed without any ticket and its pot wasn't touched yet
     function unsoldAndClosed() public view returns (bool) {
-        return allTickets.length == 0 && block.timestamp >= winfall.closeTime && !potSnapshotTaken;
+        return totalSupply() == 0 && block.timestamp >= winfall.closeTime && !potSnapshotTaken;
     }
 
     receive() external payable {}

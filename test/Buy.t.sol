@@ -157,4 +157,46 @@ contract BuyTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IPool.TICKET_TAKEN.selector, 9));
         mgr.buyTickets{value: 2 ether}(p, _ids(9, 9), ref); // duplicate inside one batch
     }
+
+    /// the ticket nft is enumerable: a user's ticket ids can be read on chain
+    function test_ticketsOfOwnerAreEnumerable() public {
+        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0));
+        Pool pool = Pool(payable(p));
+        address other = address(0x0DD);
+        vm.deal(buyer, 10 ether);
+        vm.deal(other, 10 ether);
+        vm.prank(buyer);
+        mgr.buyTickets{value: 3 ether}(p, _ids(7, 777, 42), address(0));
+        vm.prank(other);
+        mgr.buyTickets{value: 1 ether}(p, _ids(5), address(0));
+
+        uint256[] memory mine = pool.ticketsOf(buyer);
+        assertEq(mine.length, 3);
+        assertEq(mine[0], 7);
+        assertEq(mine[1], 777);
+        assertEq(mine[2], 42);
+        assertEq(pool.balanceOf(buyer), 3);
+        assertEq(pool.tokenOfOwnerByIndex(buyer, 1), 777);
+        assertEq(pool.ticketsOf(other)[0], 5);
+        assertEq(pool.ticketsOf(address(0xBEEF)).length, 0);
+
+        // all tickets of the pool, in the order they were minted
+        assertEq(pool.totalSupply(), 4);
+        assertEq(pool.tokenByIndex(0), 7);
+        assertEq(pool.tokenByIndex(3), 5);
+
+        // a transfer moves the ticket between the two lists
+        vm.prank(buyer);
+        pool.transferFrom(buyer, other, 777);
+        assertEq(pool.ticketsOf(buyer).length, 2);
+        uint256[] memory theirs = pool.ticketsOf(other);
+        assertEq(theirs.length, 2);
+        assertEq(theirs[1], 777);
+        assertEq(pool.totalSupply(), 4); // and doesn't change the pool's list the draw uses
+        assertEq(pool.tokenByIndex(1), 777);
+
+        // each pool has its own tickets
+        address p2 = mgr.createPool("W2", _w(address(0), 1 ether, 0, 0));
+        assertEq(Pool(payable(p2)).ticketsOf(buyer).length, 0);
+    }
 }

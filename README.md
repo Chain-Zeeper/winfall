@@ -39,7 +39,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 ## Pool lifecycle
 
 1. **Create.** An account with `POOL_CREATOR_ROLE` calls `PoolManager.createPool(symbol, winfall)`. The manager clones `Pool`, initializes it with itself as owner, registers the clone as a VRF consumer, and, when the payment token differs from the pot currency, stores a swap route from the swapper.
-2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until the pool's `closeTime`. Buyers choose their own ticket numbers, and the ticket's NFT id is that number. The whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `Pool.ticketExists(id)`.
+2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until the pool's `closeTime`. Buyers choose their own ticket numbers, and the ticket's NFT id is that number. The whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `Pool.ticketExists(id)`. The ticket NFT is enumerable: `Pool.ticketsOf(owner)` returns every ticket id an address holds in that pool (or page with `balanceOf` and `tokenOfOwnerByIndex`), and `totalSupply` / `tokenByIndex` list all tickets of the pool in the order they were minted.
 3. **Request randomness.** After `closeTime`, a pool creator calls `PoolManager.requestWinners(pool)`, which sends one VRF request.
    - If no answer arrives within `VRF_RETRY_DELAY` (10 minutes), the request can be sent again.
    - Earlier requests stay valid, and whichever answer arrives first becomes the seed. A retry therefore can't cancel a seed that is already on its way.

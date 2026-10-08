@@ -89,6 +89,8 @@ interface IPool {
     function getConfig() external view returns (PoolConfig memory);
     function isOpen() external view returns (bool);
     function ticketExists(uint256 ticketId) external view returns (bool);
+    /// @notice every ticket id `owner` holds in this pool
+    function ticketsOf(address owner) external view returns (uint256[] memory);
     function getWinners() external view returns (uint256[] memory);
     function winnerAt(uint256 index) external view returns (address);
     function allClaimed() external view returns (bool);
