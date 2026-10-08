@@ -80,11 +80,11 @@ contract ClaimTest is Test {
     }
 
     function test_rescueLockedUntilAllClaimed() public {
-        vm.expectRevert("pot locked until winners are paid and the rest rolled over");
+        vm.expectRevert("pot locked until every winner has claimed");
         pool.rescueFunds(address(0), address(this), 1);
         vm.prank(_holder(0));
         pool.claim(0);
-        vm.expectRevert("pot locked until winners are paid and the rest rolled over");
+        vm.expectRevert("pot locked until every winner has claimed");
         pool.rescueFunds(address(0), address(this), 1);
         vm.prank(_holder(1));
         pool.claim(1);

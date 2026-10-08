@@ -34,6 +34,7 @@ interface IPool {
     event LateFulfillmentIgnored(uint256 indexed requestId);
     /// the share of the positions nobody won moved into pool `to`
     event RolledOver(address indexed to, uint256 amount);
+    event TicketAirdropped(address indexed to, uint256 indexed ticketId);
 
     error RANDOMNESS_ALREADY_FULFILLED();
     error ONLY_VRF_COORDINATOR(address caller);
@@ -70,6 +71,9 @@ interface IPool {
 
     // ---- owner (PoolManager) ----
     function safeMint(address to, uint256 tokenId) external;
+    /// @notice mints a free ticket that's in the draw like a bought one. how many can be given away is limited by the
+    ///         owner (PoolManager.airdropsLeft)
+    function airdrop(address to, uint256 tokenId) external;
     /// @notice starts the draw after close, how the randomness arrives is up to the implementation
     function requestWinners() external returns (uint256 requestId);
     function rescueFunds(address token, address to, uint256 amount) external;
@@ -101,4 +105,9 @@ interface IPool {
     function drawn() external view returns (bool);
     /// @notice what rollover() would move, 0 before the draw or once rolled over
     function rolloverAmount() external view returns (uint256);
+    /// @notice tickets that were bought (airdropped ones aren't counted)
+    function ticketsSold() external view returns (uint256);
+    function ticketsAirdropped() external view returns (uint256);
+    /// @notice the pool closed without any ticket and its pot wasn't touched yet, so its seed can be taken back
+    function unsoldAndClosed() external view returns (bool);
 }

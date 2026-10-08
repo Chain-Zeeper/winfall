@@ -78,7 +78,7 @@ contract BuyTest is Test {
         assertEq(p.balance, 2.85 ether); // the pot isn't touched by the referral
         assertEq(address(mgr).balance, 0.03 ether); // referral earnings wait to be claimed
         assertEq(Pool(payable(p)).ownerOf(777), buyer);
-        assertEq(Pool(payable(p)).ticketsMinted(), 3);
+        assertEq(Pool(payable(p)).ticketsSold(), 3);
     }
 
     function test_buyTokenSplitsFees() public {

@@ -387,6 +387,30 @@ contract SwapTest is Test {
         vm.stopPrank();
     }
 
+    /// usdt tickets, btc pot: the seeded btc is valued in usdt at the twap to size the airdrop allowance
+    function test_airdropAllowanceValuesSeedAtTwap() public {
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
+        assertEq(mgr.airdropsLeft(p), 0);
+        btc.mint(p, 1e18); // seeded: 1 btc = 60000 usdt = 600 tickets of 100 usdt
+        // minus the swapper's 1% slippage margin and tick rounding
+        assertApproxEqAbs(mgr.airdropsLeft(p), 594, 2);
+        uint256 before = mgr.airdropsLeft(p);
+
+        vm.prank(buyer); // sales are swapped into the pot too, but only the seed counts
+        mgr.buyTickets(p, _ids(1, 2), ref);
+        assertEq(mgr.soldIntoPot(p), uint256(190e18) / 60000);
+        assertEq(mgr.seededPot(p), 1e18);
+        assertEq(mgr.airdropsLeft(p), before);
+
+        address[] memory tos = new address[](1);
+        uint256[] memory ids = new uint256[](1);
+        tos[0] = buyer;
+        ids[0] = 777;
+        mgr.airdrop(p, tos, ids);
+        assertEq(Pool(payable(p)).ownerOf(777), buyer);
+        assertEq(mgr.airdropsLeft(p), before - 1);
+    }
+
     function _assertNothingLeft() internal view {
         assertEq(
             usdt.balanceOf(address(mgr)) + usdt.balanceOf(address(swapper)), mgr.referralEarnings(ref, address(usdt))

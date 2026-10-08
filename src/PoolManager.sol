@@ -13,6 +13,10 @@ import {Pool} from "./Pool.sol";
 
 error INVALID_CLOSE_TIME();
 error INVALID_ROLLOVER_TARGET();
+error LENGTH_MISMATCH();
+error AIRDROP_LIMIT(uint256 left, uint256 requested);
+error ONLY_SEED_WITHDRAWABLE(uint256 seeded, uint256 requested);
+error POT_LOCKED();
 error WINFALL_STILL_OPEN();
 error UNKNOWN_POOL(address pool);
 error VRF_CONFIG_MISMATCH();
@@ -58,14 +62,20 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     /// route used for each pool's swaps, found by the swapper when the pool is created
     mapping(address => bytes) public swapRoute;
 
-    /// referrer each buyer is tied to, set by their first purchase with a referrer and never changed after
+    /// who referred each buyer: set by their first purchase with a referrer, the only one that pays a referral
     mapping(address => address) public referrerOf;
+    /// how much of a pool's pot arrived by rollover from other pools, in the pot currency
+    mapping(address => uint256) public rolledIn;
+    /// how much of a pool's pot came from ticket sales, in the pot currency. what's in the pot beyond rolledIn and
+    /// this was seeded, and only seeded money can be airdropped against
+    mapping(address => uint256) public soldIntoPot;
     /// unclaimed referral earnings per referrer per token (address(0) = native)
     mapping(address => mapping(address => uint256)) public referralEarnings;
 
     event PoolImplementationSet(address indexed implementation);
     event PoolCreated(address indexed pool, string name, uint256 closeTime);
     event PotRolledOver(address indexed fromPool, address indexed toPool, uint256 amount);
+    event TicketsAirdropped(address indexed pool, address[] to, uint256[] ticketIds);
     event FeeTreasurySet(address indexed treasury);
     event TicketsBought(
         address indexed pool,
@@ -214,6 +224,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
             INVALID_ROLLOVER_TARGET()
         );
         amount = from.rollover(toPool);
+        rolledIn[toPool] += amount;
         emit PotRolledOver(fromPool, toPool, amount);
     }
 
@@ -239,11 +250,68 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         Pool(payable(address(_pool(pool)))).setBaseURI(newBaseURI);
     }
 
+    /// @notice gives away free tickets of `pool`: ticketIds[i] goes to to[i]. limited by airdropsLeft
+    function airdrop(address pool, address[] calldata to, uint256[] calldata ticketIds)
+        external
+        onlyRole(POOL_CREATOR_ROLE)
+    {
+        require(to.length == ticketIds.length, LENGTH_MISMATCH());
+        uint256 left = airdropsLeft(pool);
+        require(to.length <= left, AIRDROP_LIMIT(left, to.length));
+        IPool p = IPool(pool);
+        for (uint256 i = 0; i < to.length; i++) {
+            p.airdrop(to[i], ticketIds[i]);
+        }
+        emit TicketsAirdropped(pool, to, ticketIds);
+    }
+
+    /// @notice how many more tickets of `pool` can be airdropped right now. airdropped tickets can be worth as much
+    ///         as the money seeded into the pot, counted at the ticket price: every free ticket is backed by seeded
+    ///         money like a bought one is by its price. ticket sales and money rolled over from another pool don't
+    ///         add any allowance. a pot in another currency than the tickets is valued at the swapper's twap (minus
+    ///         its slippage)
+    function airdropsLeft(address pool) public view returns (uint256) {
+        Winfall storage w = _winfalls[pool];
+        require(w.pool != address(0), UNKNOWN_POOL(pool));
+        uint256 seeded = seededPot(pool);
+        if (seeded > 0 && w.paymentToken != w.currency) {
+            seeded = swapper.minOut(swapper.findRoute(w.currency, w.paymentToken), seeded);
+        }
+        uint256 allowed = seeded / w.ticketPrice;
+        uint256 airdropped = IPool(pool).ticketsAirdropped();
+        return allowed > airdropped ? allowed - airdropped : 0;
+    }
+
+    /// @notice the part of `pool`'s pot that was seeded: what's in it beyond ticket sales and rollovers
+    function seededPot(address pool) public view returns (uint256) {
+        uint256 pot = _pool(pool).pot();
+        uint256 notSeeded = rolledIn[pool] + soldIntoPot[pool];
+        return pot > notSeeded ? pot - notSeeded : 0;
+    }
+
+    /// @notice rescues tokens from a pool. its pot currency only when the pool allows it: leftovers once winners
+    ///         are paid and the unwon share rolled over, or the seeded money of a pool that closed without any
+    ///         ticket (pass type(uint256).max for all of the seed)
     function rescuePoolFunds(address pool, address token, address to, uint256 amount)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
-        _pool(pool).rescueFunds(token, to, amount);
+        IPool p = _pool(pool);
+        // the pool allows more than this, the limits on its pot currency are enforced here
+        if (token == _winfalls[pool].currency) {
+            if (p.unsoldAndClosed()) {
+                // a pool that closed without any ticket gives its seed back, but not money that rolled over into it
+                uint256 seeded = seededPot(pool);
+                if (amount == type(uint256).max) {
+                    amount = seeded;
+                }
+                require(amount <= seeded, ONLY_SEED_WITHDRAWABLE(seeded, amount));
+            } else {
+                // otherwise only leftovers: every winner paid and the unwon share rolled over
+                require(p.allClaimed() && p.rolloverAmount() == 0, POT_LOCKED());
+            }
+        }
+        p.rescueFunds(token, to, amount);
     }
 
     // ---- tickets ----
@@ -256,8 +324,8 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     ///         if the pot currency differs, the swapper swaps that rest into the pot currency straight into the pool
     ///         along the pool's stored route, reverting if the pool would get less than the twap fair amount.
     ///         native pools take exact msg.value, token pools need an approval of the full price.
-    /// @param referrer who referred the buyer, address(0) for nobody. only the first referrer a buyer ever uses
-    ///        counts, later purchases keep paying that one whatever is passed here
+    /// @param referrer who referred the buyer, address(0) for nobody. a buyer pays a referral once, on their first
+    ///        purchase with a referrer. it's ignored on every purchase after that, in any pool
     function buyTickets(address pool, uint256[] calldata ticketIds, address referrer) external payable nonReentrant {
         Winfall storage w = _checkBuy(pool, ticketIds.length);
         uint256 total = w.ticketPrice * ticketIds.length;
@@ -268,8 +336,9 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         } else {
             require(msg.value == 0, WRONG_PAYMENT(0, msg.value));
         }
-        _distribute(w, pool, total, msg.sender, _referrer(referrer));
-        _mint(pool, ticketIds, total, w);
+        address paidReferrer = _referrer(referrer);
+        _distribute(w, pool, total, msg.sender, paidReferrer);
+        _mint(pool, ticketIds, total, w, paidReferrer);
     }
 
     /// @notice like buyTickets, but pays with any token (or native, tokenIn = address(0) with msg.value = maxAmountIn)
@@ -311,8 +380,9 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         }
         emit PaidWithSwap(pool, msg.sender, tokenIn, spent);
 
-        _distribute(w, pool, total, address(this), _referrer(referrer));
-        _mint(pool, ticketIds, total, w);
+        address paidReferrer = _referrer(referrer);
+        _distribute(w, pool, total, address(this), paidReferrer);
+        _mint(pool, ticketIds, total, w, paidReferrer);
     }
 
     function _checkBuy(address pool, uint256 count) internal view returns (Winfall storage w) {
@@ -335,10 +405,11 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         emit ReferralClaimed(msg.sender, token, amount);
     }
 
-    /// @dev the buyer's referrer: the one they're already tied to, else `referrer` becomes it (not themselves)
+    /// @dev the referrer this purchase pays, if any. a buyer pays a referral once: on their first purchase made with
+    ///      a referrer (not themselves). that referrer stays on record in referrerOf, and no later purchase of the
+    ///      buyer, in any pool, pays a referral again
     function _referrer(address referrer) internal returns (address) {
-        address bound = referrerOf[msg.sender];
-        if (bound != address(0)) return bound;
+        if (referrerOf[msg.sender] != address(0)) return address(0);
         if (referrer == address(0) || referrer == msg.sender) return address(0);
         referrerOf[msg.sender] = referrer;
         emit ReferrerSet(msg.sender, referrer);
@@ -363,6 +434,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         if (payToken == address(0)) {
             _sendEth(feeTreasury, protocolFee);
             _sendEth(pool, toPot);
+            soldIntoPot[pool] += toPot;
             return;
         }
 
@@ -371,11 +443,12 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         _move(token, from, address(this), referralCut);
         if (payToken == w.currency) {
             _move(token, from, pool, toPot);
+            soldIntoPot[pool] += toPot;
         } else {
             // swapper checks the output against the route's twap and sends it straight into the pool
             _move(token, from, address(this), toPot);
             SafeERC20.forceApprove(token, address(swapper), toPot);
-            swapper.swap(swapRoute[pool], toPot, pool);
+            soldIntoPot[pool] += swapper.swap(swapRoute[pool], toPot, pool);
             SafeERC20.forceApprove(token, address(swapper), 0);
         }
     }
@@ -389,11 +462,13 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         }
     }
 
-    function _mint(address pool, uint256[] calldata ticketIds, uint256 total, Winfall storage w) internal {
+    /// @param referrer the referrer this purchase paid, address(0) if none
+    function _mint(address pool, uint256[] calldata ticketIds, uint256 total, Winfall storage w, address referrer)
+        internal
+    {
         for (uint256 i = 0; i < ticketIds.length; i++) {
             IPool(pool).safeMint(msg.sender, ticketIds[i]);
         }
-        address referrer = referrerOf[msg.sender];
         uint256 fee = total * w.feeBps / FEE_DENOMINATOR;
         emit TicketsBought(
             pool,

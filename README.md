@@ -56,6 +56,8 @@ Built with [Foundry](https://book.getfoundry.sh/).
 7. **Clean up.**
    - `PoolManager.releaseVrfConsumer(pool)` frees the pool's slot on the VRF subscription once the draw is done.
    - Once every winner has been paid and the unwon share has been rolled over, the admin can recover leftover dust or late top-ups with `rescuePoolFunds`.
+   - A pool that closed without a single ticket, sold or airdropped, gives its seeded money back: `rescuePoolFunds` lets the admin withdraw up to `seededPot(pool)`. Money that rolled over into it still has to be rolled on.
+   - Tokens other than the pot currency (and stray BNB in a token pool) can be rescued at any time.
 
 ## Difficulty and rollover
 
@@ -63,7 +65,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 - **Too few tickets:** a position also has no winner when there are fewer tickets than positions.
 - **Unwon shares aren't split among the winners.** Each winner gets exactly their own position's share. The rest, `potSnapshot * unwon shares / 10_000`, is what `rolloverAmount()` reports.
 - **Rollover moves that money from pool to pool:** `PoolManager.rollover(fromPool, toPool)` sends it straight into `toPool`'s pot. `toPool` must be another pool of this manager with the same pot currency that hasn't been drawn yet. It can't go to a wallet, and it can only be done once per pool.
-- **The admin can't take the unwon share.** `rescuePoolFunds` refuses the pot currency until every winner is paid and the rest has been rolled over. There is no way to withdraw a pot, including one the operator seeded, except through prizes.
+- **The admin can't take the unwon share.** `rescuePoolFunds` refuses the pot currency until every winner is paid and the rest has been rolled over. The one exception is a pool that closed without any ticket: its seeded money can be withdrawn, because nobody has a stake in it. Rolled-over money never can.
 - **A jackpot ends with a guaranteed pool:** to make sure a rolled-over pot is finally paid, the operator creates a pool with no difficulties and rolls into it. That is operator policy; the contracts don't force it.
 
 ## Buying tickets
@@ -83,7 +85,7 @@ buyTicketsWith(pool, ticketIds, tokenIn, maxAmountIn, deadline, referrer)
 
 | Share of the ticket price | Destination |
 |---|---|
-| `feeBps` | the protocol fee. Out of it, `referralBps` of the ticket price goes to the buyer's referrer, as earnings they claim with `claimReferral(token)`. What's left of the fee, or all of it when the buyer has no referrer, goes to `feeTreasury`. |
+| `feeBps` | the protocol fee. Out of it, on a buyer's first referred purchase, `referralBps` of the ticket price goes to the referrer, as earnings they claim with `claimReferral(token)`. What's left of the fee, or all of it when no referral is paid, goes to `feeTreasury`. |
 | the rest | the pool's pot. If the pot currency differs from `paymentToken`, it's swapped through the swapper directly into the pool. |
 
 Both are in basis points of the ticket price (`10_000` is 100%). `feeBps` is capped at `MAX_PROTOCOL_CUT` (50%), and `referralBps` can't be more than `feeBps`, because the referral is paid out of the fee.
@@ -91,9 +93,22 @@ Both are in basis points of the ticket price (`10_000` is 100%). `feeBps` is cap
 Example with a 100 USDT purchase, `feeBps = 500` and `referralBps = 100`: the fee is 5 USDT, of which the referrer gets 1 USDT and the treasury 4 USDT. The pot gets 95 USDT, with or without a referrer.
 
 **Referrals:**
-- A buyer's first non-zero referrer is saved permanently in `referrerOf[buyer]`, and every later purchase pays that referrer whatever `referrer` is passed.
+- **A buyer pays a referral once.** Their first purchase made with a referrer pays that referrer and records them in `referrerOf[buyer]`. After that, none of the buyer's purchases, in any pool, pay a referral, whatever `referrer` is passed; the whole fee goes to the treasury.
+- A purchase without a referrer doesn't use up that one referral.
+- Any address can be a referrer. It doesn't need to hold a ticket.
 - Self-referral is ignored.
 - Earnings build up per token and are withdrawn with `claimReferral(token)`, so a referrer who can't receive funds never blocks a purchase.
+
+## Airdrops
+
+A pool creator can give away free tickets with `PoolManager.airdrop(pool, to[], ticketIds[])`.
+
+- **Limited by the money seeded into the pot:** airdropped tickets can be worth as much as the seeded money, counted at the ticket price. A 1 BNB seed with 0.01 BNB tickets allows 100 free tickets. `PoolManager.airdropsLeft(pool)` returns how many are available right now, and `seededPot(pool)` the seeded amount.
+- **Every free ticket is backed by seeded money,** the way a bought ticket is backed by its price. A seeded pool can airdrop before its first sale, and seeding more allows more.
+- **Ticket sales and rolled-over money add no allowance.** That's the players' money. The manager records both per pool (`soldIntoPot`, `rolledIn`); whatever else is in the pot counts as seeded.
+- **Pots in another currency** than the tickets (USDT tickets, BTCB pot) are valued in the ticket's token at the swapper's TWAP, minus its slippage margin.
+- **Airdropped tickets are ordinary tickets:** they take part in the draw and can win. `Pool` counts them in `ticketsAirdropped`, separately from `ticketsSold`.
+- **Same rules as buying:** only while the pool is open, and a taken ticket number is rejected. A batch that would cross the limit reverts as a whole.
 
 ## Swaps and price protection
 
@@ -115,11 +130,13 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 | Who | Can do |
 |---|---|
 | `DEFAULT_ADMIN_ROLE` on `PoolManager` | Grant and revoke roles; `setPoolImplementation`, `setSwapper`, `setFeeTreasury`, `rescuePoolFunds`, `acceptVrfSubscription`, `transferVrfSubscription`. |
-| `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `rollover`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
+| `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `rollover`, `airdrop`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
 | Owner of `PancakeV3Swapper` | `setHubs`, `setTwapWindow` (5 minutes to 1 day), `setMaxSlippage` (at most 10%). |
 | Anyone | Buy tickets, `pickWinners`, `distribute`; winners `claim`; referrers `claimReferral`. |
 
 `PoolManager` is the owner of every pool, so owner-only pool functions are reached through the manager.
+
+**Several limits are enforced by the manager, not by the pool:** which pool a rollover can go into, how many tickets can be airdropped, and what `rescuePoolFunds` can take out of a pot (only the seed of an unsold pool, or leftovers once winners are paid and the rest is rolled over). A `Pool` on its own only refuses to release its pot while it has tickets and unpaid winners. These guarantees therefore depend on `PoolManager` staying the owner of its pools, which it always is: it has no function to transfer a pool's ownership.
 
 ## Deployment
 

@@ -82,18 +82,40 @@ contract ReferralTest is Test {
         assertEq(treasury.balance, 0.04 ether + 0.05 ether); // the whole fee
     }
 
-    function test_firstReferrerSticks() public {
+    /// a buyer pays a referral once: on their first purchase with a referrer. nothing after that, in any pool
+    function test_referralIsPaidOnlyOnce() public {
         address p = _pool(address(0));
+        address other = _pool(address(0));
         vm.prank(bob);
         mgr.buyTickets{value: 1 ether}(p, _ids(1), alice);
         assertEq(mgr.referrerOf(bob), alice);
-        vm.prank(bob); // carol ignored, alice keeps earning
-        mgr.buyTickets{value: 1 ether}(p, _ids(2), carol);
-        vm.prank(bob);
-        mgr.buyTickets{value: 1 ether}(p, _ids(3), address(0));
-        assertEq(mgr.referralEarnings(alice, address(0)), 0.03 ether); // 1% of 3 tickets
+        assertEq(mgr.referralEarnings(alice, address(0)), 0.01 ether);
+        assertEq(treasury.balance, 0.04 ether);
+
+        vm.prank(bob); // same referrer again: not paid twice
+        mgr.buyTickets{value: 1 ether}(p, _ids(2), alice);
+        vm.prank(bob); // another referrer: bob already used his referral
+        mgr.buyTickets{value: 1 ether}(p, _ids(3), carol);
+        vm.prank(bob); // another pool: still nothing
+        mgr.buyTickets{value: 1 ether}(other, _ids(1), alice);
+
+        assertEq(mgr.referralEarnings(alice, address(0)), 0.01 ether); // only the first purchase
         assertEq(mgr.referralEarnings(carol, address(0)), 0);
-        assertEq(p.balance, 2.85 ether);
+        assertEq(mgr.referrerOf(bob), alice); // still on record
+        assertEq(treasury.balance, 0.04 ether + 3 * 0.05 ether); // the later fees go to the treasury in full
+        assertEq(p.balance, 2.85 ether); // the pot always gets 95%
+        assertEq(other.balance, 0.95 ether);
+    }
+
+    /// buying without a referrer first doesn't use up the one referral
+    function test_referralCanStillBeUsedAfterUnreferredPurchases() public {
+        address p = _pool(address(0));
+        vm.prank(bob);
+        mgr.buyTickets{value: 1 ether}(p, _ids(1), address(0));
+        assertEq(mgr.referrerOf(bob), address(0));
+        vm.prank(bob);
+        mgr.buyTickets{value: 1 ether}(p, _ids(2), alice);
+        assertEq(mgr.referralEarnings(alice, address(0)), 0.01 ether);
     }
 
     function test_selfReferralIgnored() public {
@@ -109,16 +131,16 @@ contract ReferralTest is Test {
         address pt = _pool(address(tok));
         vm.prank(bob);
         mgr.buyTickets{value: 1 ether}(pe, _ids(1), alice);
-        tok.transfer(bob, 10 ether);
-        vm.startPrank(bob);
+        tok.transfer(carol, 10 ether); // a referral is per buyer, so the token pool's referral comes from carol
+        vm.startPrank(carol);
         tok.approve(address(mgr), 10 ether);
-        mgr.buyTickets(pt, _ids(1), address(0));
+        mgr.buyTickets(pt, _ids(1), alice);
         vm.stopPrank();
 
         vm.startPrank(alice);
         assertEq(mgr.claimReferral(address(0)), 0.01 ether);
         assertEq(alice.balance, 0.01 ether);
-        assertEq(mgr.claimReferral(address(tok)), 0.01 ether); // bob's tie applies to every pool
+        assertEq(mgr.claimReferral(address(tok)), 0.01 ether);
         assertEq(tok.balanceOf(alice), 0.01 ether);
         vm.expectRevert(NOTHING_TO_CLAIM.selector);
         mgr.claimReferral(address(0));
@@ -137,6 +159,6 @@ contract ReferralTest is Test {
         vm.prank(rej); // only the referrer is stuck
         vm.expectRevert();
         mgr.claimReferral(address(0));
-        assertEq(mgr.referralEarnings(rej, address(0)), 0.02 ether);
+        assertEq(mgr.referralEarnings(rej, address(0)), 0.01 ether); // from the first purchase
     }
 }

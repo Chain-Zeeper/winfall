@@ -324,20 +324,22 @@ contract RolloverTest is Test {
         assertEq(p.claim(0), 30 ether);
     }
 
-    function test_potIsLockedUntilPaidAndRolledOver() public {
+    /// the pool itself only locks its pot until every winner claimed. keeping the unwon share for the rollover is
+    /// its owner's job (PoolManager.rescuePoolFunds), see test_managerKeepsUnwonShareLockedUntilRolledOver
+    function test_poolLocksPotUntilWinnersClaimed() public {
         Pool p = _pool(_diff(9_000, 0, 5_000));
         _mint(p, 10);
         vm.deal(address(p), 100 ether);
 
-        vm.expectRevert("pot locked until winners are paid and the rest rolled over"); // not before the draw
+        vm.expectRevert("pot locked until every winner has claimed"); // not before the draw
         p.rescueFunds(address(0), address(this), 1);
 
         _draw(p, _seedMissing0And2(9_000, 5_000));
+        vm.expectRevert("pot locked until every winner has claimed"); // the winner isn't paid yet
+        p.rescueFunds(address(0), address(this), 1);
         address winner = p.winnerAt(0);
         vm.prank(winner);
         p.claim(0);
-        vm.expectRevert("pot locked until winners are paid and the rest rolled over"); // unwon share still there
-        p.rescueFunds(address(0), address(this), 1);
 
         p.rollover(address(0xBEEF));
         vm.deal(address(p), 1 ether); // dust / late top up
@@ -459,7 +461,7 @@ contract RolloverTest is Test {
         vm.expectRevert(INVALID_ROLLOVER_TARGET.selector); // already drawn, the money would miss its pot
         mgr.rollover(a, drawnPool);
 
-        vm.expectRevert("pot locked until winners are paid and the rest rolled over"); // the admin can't take it
+        vm.expectRevert(POT_LOCKED.selector); // the admin can't take it
         mgr.rescuePoolFunds(a, address(0), address(this), 1 ether);
 
         address open = mgr.createPool("B", _winfall(address(0), 0));
@@ -468,6 +470,40 @@ contract RolloverTest is Test {
         mgr.rollover(a, open);
         mgr.rollover(a, open);
         assertEq(open.balance, 1 ether);
+    }
+
+    /// through the manager the pot currency stays locked while winners are unpaid AND while the unwon share
+    /// hasn't been rolled over, although the pool alone would release it once winners are paid
+    function test_managerKeepsUnwonShareLockedUntilRolledOver() public {
+        // two positions: 1st 90% hard, 2nd always won. one buyer, drawn so that only 2nd place is won
+        Winfall memory w = _winfall(address(0), 0);
+        w.winningShares = new uint256[](2);
+        w.winningShares[0] = 6_000;
+        w.winningShares[1] = 4_000;
+        w.difficultiesBps = new uint16[](2);
+        w.difficultiesBps[0] = 9_000;
+        address p = mgr.createPool("A", w);
+        address alice = address(0xA11CE);
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        mgr.buyTickets{value: 1 ether}(p, _ids(7), address(0));
+        vm.warp(IPool(p).getConfig().closeTime);
+        coord.fulfill(p, mgr.requestWinners(p), _missSeed(9_000));
+        assertEq(IPool(p).pickWinners().length, 1);
+
+        vm.expectRevert(POT_LOCKED.selector); // winner not paid
+        mgr.rescuePoolFunds(p, address(0), address(this), 1);
+        vm.prank(alice);
+        assertEq(IPool(p).claim(0), 0.4 ether);
+        assertTrue(IPool(p).allClaimed());
+        vm.expectRevert(POT_LOCKED.selector); // winner paid, but 0.6 ether of unwon share is still there
+        mgr.rescuePoolFunds(p, address(0), address(this), 0.6 ether);
+
+        address next = mgr.createPool("B", _winfall(address(0), 0));
+        assertEq(mgr.rollover(p, next), 0.6 ether);
+        vm.deal(p, 0.01 ether); // a late top up is all that's left to rescue
+        mgr.rescuePoolFunds(p, address(0), address(0xD057), type(uint256).max);
+        assertEq(address(0xD057).balance, 0.01 ether);
     }
 
     function test_vrfSlotReleasedOnlyAfterTheDraw() public {

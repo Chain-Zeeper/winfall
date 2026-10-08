@@ -39,7 +39,11 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
     string private _poolSymbol;
     PoolConfig public winfall;
 
-    uint256 public ticketsMinted;
+    /// tickets that were bought
+    uint256 public ticketsSold;
+    /// tickets that were given away
+    uint256 public ticketsAirdropped;
+    /// bought and airdropped tickets, all of them are in the draw
     uint256[] public allTickets;
 
     // ---- vrf ----
@@ -127,8 +131,19 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         require(isOpen(), POOL_CLOSED());
         require(_ownerOf(tokenId) == address(0), TICKET_TAKEN(tokenId));
         _safeMint(to, tokenId);
-        ticketsMinted += 1;
+        ticketsSold += 1;
         allTickets.push(tokenId);
+    }
+
+    /// @notice mints a free ticket that takes part in the draw like a bought one. the owner (PoolManager) limits how
+    ///         many can be given away
+    function airdrop(address to, uint256 tokenId) external onlyOwner {
+        require(isOpen(), POOL_CLOSED());
+        require(_ownerOf(tokenId) == address(0), TICKET_TAKEN(tokenId));
+        _safeMint(to, tokenId);
+        ticketsAirdropped += 1;
+        allTickets.push(tokenId);
+        emit TicketAirdropped(to, tokenId);
     }
 
     /// @notice `ticketId` is already sold (ownerOf reverts for unknown ids, this doesn't)
@@ -448,15 +463,13 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
         _baseUri = newBaseURI;
     }
 
-    /// @notice the pot currency can only be rescued once every winner was paid and the unwon share rolled over
-    ///         (what's left then is rounding dust and late top ups). other tokens can always be rescued
+    /// @notice the pot currency can be rescued while the pool has no ticket at all, or once every winner was paid.
+    ///         other tokens can always be rescued. the pool itself doesn't protect the unwon share or rolled over
+    ///         money here: its owner does (PoolManager.rescuePoolFunds), so never give a pool another owner
     function rescueFunds(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "cannot rescue to zero address");
         if (token == winfall.currency) {
-            require(
-                allClaimed() && (rolledOver || wonShares == BPS),
-                "pot locked until winners are paid and the rest rolled over"
-            );
+            require(allTickets.length == 0 || allClaimed(), "pot locked until every winner has claimed");
         }
 
         if (token == address(0)) {
@@ -473,6 +486,11 @@ contract Pool is IPool, ERC721, Ownable, ReentrancyGuard, Initializable {
             }
             SafeERC20.safeTransfer(IERC20(token), to, amount);
         }
+    }
+
+    /// @notice the pool closed without any ticket and its pot wasn't touched yet
+    function unsoldAndClosed() public view returns (bool) {
+        return allTickets.length == 0 && block.timestamp >= winfall.closeTime && !potSnapshotTaken;
     }
 
     receive() external payable {}
