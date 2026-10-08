@@ -15,8 +15,6 @@ interface IPool {
         uint16[] difficultiesBps;
         /// address(0) = native eth
         address currency;
-        uint256 winfallAmount;
-        uint256 threshold;
         /// tickets are sold until then
         uint256 closeTime;
     }

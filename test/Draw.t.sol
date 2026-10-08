@@ -27,7 +27,7 @@ contract DrawTest is Test {
         p = PoolClone.make(
             impl,
             address(this),
-            IPool.PoolConfig(winnersN, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(winnersN, shares, new uint16[](0), address(0), block.timestamp + 1 days)
         );
         // non sequential ids
         for (uint256 i = 1; i <= tickets; i++) {

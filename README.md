@@ -38,7 +38,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
 
 ## Pool lifecycle
 
-1. **Create.** An account with `POOL_CREATOR_ROLE` calls `PoolManager.createPool(symbol, winfall, winfallAmount, threshold)`. The manager clones `Pool`, initializes it with itself as owner, registers the clone as a VRF consumer, and, when the payment token differs from the pot currency, stores a swap route from the swapper.
+1. **Create.** An account with `POOL_CREATOR_ROLE` calls `PoolManager.createPool(symbol, winfall)`. The manager clones `Pool`, initializes it with itself as owner, registers the clone as a VRF consumer, and, when the payment token differs from the pot currency, stores a swap route from the swapper.
 2. **Sell.** Buyers call `buyTickets` or `buyTicketsWith` until the pool's `closeTime`. Buyers choose their own ticket numbers, and the ticket's NFT id is that number. The whole batch reverts with `TICKET_TAKEN` if any number is already sold. Frontends can check a number first with `Pool.ticketExists(id)`.
 3. **Request randomness.** After `closeTime`, a pool creator calls `PoolManager.requestWinners(pool)`, which sends one VRF request.
    - If no answer arrives within `VRF_RETRY_DELAY` (10 minutes), the request can be sent again.
@@ -81,13 +81,14 @@ buyTicketsWith(pool, ticketIds, tokenIn, maxAmountIn, deadline, referrer)
 
 **Where the payment goes:**
 
-| Share | Destination |
+| Share of the ticket price | Destination |
 |---|---|
-| `feeBps` | `feeTreasury` |
-| `referralBps` | the buyer's referrer, as earnings they claim with `claimReferral(token)`. With no referrer it goes into the pot. |
+| `feeBps` | the protocol fee. Out of it, `referralBps` of the ticket price goes to the buyer's referrer, as earnings they claim with `claimReferral(token)`. What's left of the fee, or all of it when the buyer has no referrer, goes to `feeTreasury`. |
 | the rest | the pool's pot. If the pot currency differs from `paymentToken`, it's swapped through the swapper directly into the pool. |
 
-Fees are in basis points: `10_000` is 100%, and `feeBps` is capped at `MAX_PROTOCOL_CUT` (50%).
+Both are in basis points of the ticket price (`10_000` is 100%). `feeBps` is capped at `MAX_PROTOCOL_CUT` (50%), and `referralBps` can't be more than `feeBps`, because the referral is paid out of the fee.
+
+Example with a 100 USDT purchase, `feeBps = 500` and `referralBps = 100`: the fee is 5 USDT, of which the referrer gets 1 USDT and the treasury 4 USDT. The pot gets 95 USDT, with or without a referrer.
 
 **Referrals:**
 - A buyer's first non-zero referrer is saved permanently in `referrerOf[buyer]`, and every later purchase pays that referrer whatever `referrer` is passed.
@@ -113,33 +114,68 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 
 | Who | Can do |
 |---|---|
-| `DEFAULT_ADMIN_ROLE` on `PoolManager` | Grant and revoke roles; `setPoolImplementation`, `setSwapper`, `setFeeTreasury`, `rescuePoolFunds`. |
+| `DEFAULT_ADMIN_ROLE` on `PoolManager` | Grant and revoke roles; `setPoolImplementation`, `setSwapper`, `setFeeTreasury`, `rescuePoolFunds`, `acceptVrfSubscription`, `transferVrfSubscription`. |
 | `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `rollover`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
 | Owner of `PancakeV3Swapper` | `setHubs`, `setTwapWindow` (5 minutes to 1 day), `setMaxSlippage` (at most 10%). |
 | Anyone | Buy tickets, `pickWinners`, `distribute`; winners `claim`; referrers `claimReferral`. |
 
 `PoolManager` is the owner of every pool, so owner-only pool functions are reached through the manager.
 
-## Deployment checklist (BNB Chain)
+## Deployment
 
-1. **Pool implementation:** deploy `Pool(vrfCoordinator, keyHash, subscriptionId)`. The VRF settings are immutable in its code and shared by every clone.
-2. **Swapper:** deploy `PancakeV3Swapper(owner, smartRouter, v3Factory, WBNB, hubs)`, for example with `hubs = [WBNB, USDT]`.
-3. **Manager:** deploy `PoolManager(admin, feeTreasury, poolImplementation, vrfCoordinator, subscriptionId)`, then call `setSwapper(swapper)`.
-4. **VRF subscription:** transfer ownership of the Chainlink VRF subscription to `PoolManager`, which needs it to add and remove each pool as a consumer. Keep the subscription funded, because an underfunded subscription stalls the draw.
-5. **Price history on routed pools:** make sure every PancakeSwap pool on a route has enough observation slots for the TWAP window. Call `increaseObservationCardinalityNext` once per pool, roughly `twapWindow / block time`, about 600 for 30 minutes on BNB Chain. Otherwise the swap reverts with `OLD` or the pool is skipped during routing.
-6. **Admin account:** make the admin a multisig. Grant `POOL_CREATOR_ROLE` only to accounts you trust with the draw, because retrying a VRF request is a creator action.
+The scripts in [script/](script/) deploy everything. BSC testnet (chain 97) and BNB Chain mainnet (chain 56) are configured in [NetworkConfig.sol](script/NetworkConfig.sol).
 
-Addresses used by the fork tests, verified on-chain:
+**Setup, once:**
 
-| | Address |
-|---|---|
-| PancakeSwap V3 SmartRouter | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` |
-| PancakeSwap V3 Factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` |
-| WBNB | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` |
-| USDT (BSC-USD, 18 decimals) | `0x55d398326f99059fF775485246999027B3197955` |
-| BTCB (18 decimals) | `0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c` |
+```shell
+cp .env.example .env                       # set the RPC URLs
+cast wallet import deployer --interactive  # keeps the key in an encrypted keystore, not in .env
+source .env
+```
 
-Check the Chainlink VRF coordinator and key hash against Chainlink's documentation for BNB Chain.
+**1. Create a Chainlink VRF subscription** owned by the deployer, either at [vrf.chain.link](https://vrf.chain.link) or with the script:
+
+```shell
+forge script script/CreateVrfSubscription.s.sol --rpc-url bsc_testnet --broadcast --account deployer
+# the id printed during the simulation is not the real one, read it from the transaction:
+cast receipt <tx hash> --rpc-url bsc_testnet --json | jq -r '.logs[0].topics[1]' | cast to-dec
+```
+
+The subscription has to exist before the deployment, because its id depends on the block it's created in and is built into the `Pool` implementation.
+
+**2. Deploy:**
+
+```shell
+VRF_SUBSCRIPTION_ID=<id> forge script script/Deploy.s.sol --rpc-url bsc_testnet --broadcast --account deployer
+```
+
+- **What it does:** deploys the `Pool` implementation, `PancakeV3Swapper` and `PoolManager`, sets the swapper, and hands the subscription to the manager (`requestSubscriptionOwnerTransfer`, then `PoolManager.acceptVrfSubscription`). The manager has to own the subscription to register each pool as a consumer.
+- **`ADMIN` and `FEE_TREASURY`** default to the deployer. With a different `ADMIN`, the script grants it both manager roles and removes them from the deployer at the end.
+- **`VRF_FUND_LINK=<wei>`** also funds the subscription with LINK from the deployer. Draws are paid in LINK, so the subscription needs a balance before the first `requestWinners`. On testnet, get LINK from [faucets.chain.link](https://faucets.chain.link).
+
+**3. Create a pool** (the sender needs `POOL_CREATOR_ROLE`):
+
+```shell
+POOL_MANAGER=<manager> forge script script/CreatePool.s.sol --rpc-url bsc_testnet --broadcast --account deployer
+```
+
+Defaults: a native BNB pool, 0.001 BNB per ticket, prizes 70% / 30%, open for 1 day and 10 minutes. Price, tokens, shares, difficulties and duration are set with the env vars listed at the top of [CreatePool.s.sol](script/CreatePool.s.sol).
+
+**On mainnet:**
+- Set `VRF_COORDINATOR` and `VRF_KEY_HASH` from Chainlink's documentation for BNB Chain and check them on-chain; they aren't hard-coded.
+- Make the admin a multisig, and grant `POOL_CREATOR_ROLE` only to accounts you trust with the draw, because retrying a VRF request and rolling over are creator actions.
+- Make sure every PancakeSwap pool on a swap route has enough observation slots for the TWAP window (`increaseObservationCardinalityNext`, roughly `twapWindow / block time`). Otherwise the pool is skipped during routing.
+
+**Addresses, checked on-chain:**
+
+| | BSC testnet | BNB Chain mainnet |
+|---|---|---|
+| Chainlink VRF v2.5 coordinator | `0xDA3b641D438362C440Ac5458c57e00a712b66700` | from Chainlink's docs |
+| VRF key hash | `0x8596b430971ac45bdf6088665b9ad8e8630c9d5049ab54b14dff711bee7c0e26` (50 gwei lane) | from Chainlink's docs |
+| PancakeSwap V3 SmartRouter | `0x9a489505a00cE272eAa5e07Dba6491314CaE3796` | `0x13f4EA83D0bd40E75C8222255bc855a974568Dd4` |
+| PancakeSwap V3 Factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` |
+| WBNB | `0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd` | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` |
+| USDT | `0x337610d27c682E347C9cD60BD4b3b107C9d34dDd` | `0x55d398326f99059fF775485246999027B3197955` |
 
 ## Development
 

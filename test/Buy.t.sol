@@ -68,34 +68,34 @@ contract BuyTest is Test {
     }
 
     function test_buyEthSplitsFees() public {
-        // 5% protocol, 10% referral
-        address p = mgr.createPool("W", _w(address(0), 1 ether, 500, 1_000), 0, 0);
+        // 5% protocol fee, of which 1% of the price goes to the referrer
+        address p = mgr.createPool("W", _w(address(0), 1 ether, 500, 100));
         vm.deal(buyer, 3 ether);
         vm.prank(buyer);
         mgr.buyTickets{value: 3 ether}(p, _ids(7, 777, 42), ref);
-        assertEq(treasury.balance, 0.15 ether);
-        assertEq(mgr.referralEarnings(ref, address(0)), 0.3 ether);
-        assertEq(p.balance, 2.55 ether);
-        assertEq(address(mgr).balance, 0.3 ether); // referral earnings wait to be claimed
+        assertEq(treasury.balance, 0.12 ether); // fee 0.15, minus the referrer's 0.03
+        assertEq(mgr.referralEarnings(ref, address(0)), 0.03 ether); // 1% of 3 ether
+        assertEq(p.balance, 2.85 ether); // the pot isn't touched by the referral
+        assertEq(address(mgr).balance, 0.03 ether); // referral earnings wait to be claimed
         assertEq(Pool(payable(p)).ownerOf(777), buyer);
         assertEq(Pool(payable(p)).ticketsMinted(), 3);
     }
 
     function test_buyTokenSplitsFees() public {
-        address p = mgr.createPool("W", _w(address(tok), 100e18, 500, 1_000), 0, 0);
+        address p = mgr.createPool("W", _w(address(tok), 100e18, 500, 100));
         tok.transfer(buyer, 200e18);
         vm.startPrank(buyer);
         tok.approve(address(mgr), 200e18);
         mgr.buyTickets(p, _ids(1, 2), ref);
         vm.stopPrank();
-        assertEq(tok.balanceOf(treasury), 10e18);
-        assertEq(mgr.referralEarnings(ref, address(tok)), 20e18);
-        assertEq(tok.balanceOf(p), 170e18);
-        assertEq(tok.balanceOf(address(mgr)), 20e18);
+        assertEq(tok.balanceOf(treasury), 8e18);
+        assertEq(mgr.referralEarnings(ref, address(tok)), 2e18);
+        assertEq(tok.balanceOf(p), 190e18);
+        assertEq(tok.balanceOf(address(mgr)), 2e18);
     }
 
     function test_buyRejects() public {
-        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0), 0, 0);
+        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0));
         vm.deal(buyer, 10 ether);
         vm.startPrank(buyer);
         vm.expectRevert(abi.encodeWithSelector(WRONG_PAYMENT.selector, 2 ether, 1 ether));
@@ -106,7 +106,7 @@ contract BuyTest is Test {
         vm.expectRevert(POOL_CLOSED.selector);
         mgr.buyTickets{value: 1 ether}(p, _ids(1), ref);
         vm.stopPrank();
-        address t = mgr.createPool("W", _w(address(tok), 1e18, 0, 0), 0, 0);
+        address t = mgr.createPool("W", _w(address(tok), 1e18, 0, 0));
         vm.prank(buyer);
         vm.expectRevert(abi.encodeWithSelector(WRONG_PAYMENT.selector, 0, 1));
         mgr.buyTickets{value: 1}(t, _ids(1), ref);
@@ -114,15 +114,15 @@ contract BuyTest is Test {
 
     function test_createRejectsBadFeesAndPrice() public {
         vm.expectRevert(INVALID_FEES.selector);
-        mgr.createPool("W", _w(address(0), 1 ether, 5_001, 0), 0, 0);
+        mgr.createPool("W", _w(address(0), 1 ether, 5_001, 0));
         vm.expectRevert(INVALID_FEES.selector);
-        mgr.createPool("W", _w(address(0), 1 ether, 5_000, 5_001), 0, 0);
+        mgr.createPool("W", _w(address(0), 1 ether, 500, 501));
         vm.expectRevert(INVALID_TICKET_PRICE.selector);
-        mgr.createPool("W", _w(address(0), 0, 0, 0), 0, 0);
+        mgr.createPool("W", _w(address(0), 0, 0, 0));
     }
 
     function test_onlyManagerCanMint() public {
-        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0), 0, 0);
+        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0));
         vm.prank(buyer);
         vm.expectRevert();
         Pool(payable(p)).safeMint(buyer, 99);
@@ -137,7 +137,7 @@ contract BuyTest is Test {
     }
 
     function test_takenTicketsRevertWholeBatchAndCanBeChecked() public {
-        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0), 0, 0);
+        address p = mgr.createPool("W", _w(address(0), 1 ether, 0, 0));
         vm.deal(buyer, 10 ether);
         vm.prank(buyer);
         mgr.buyTickets{value: 1 ether}(p, _ids(7), ref);

@@ -170,7 +170,7 @@ contract SwapTest is Test {
         w.paymentToken = pay;
         w.currency = pot;
         w.feeBps = 500;
-        w.referralBps = 1_000;
+        w.referralBps = 100;
         w.closeTime = block.timestamp + 2 days;
         w.winningShares = shares;
     }
@@ -222,7 +222,7 @@ contract SwapTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ISwapper.NO_ROUTE.selector, address(usdt), address(doge)));
         swapper.findRoute(address(usdt), address(doge));
         vm.expectRevert(abi.encodeWithSelector(ISwapper.NO_ROUTE.selector, address(usdt), address(doge)));
-        mgr.createPool("X", _w(address(usdt), address(doge)), 0, 0);
+        mgr.createPool("X", _w(address(usdt), address(doge)));
     }
 
     // ---- twap ----
@@ -237,13 +237,13 @@ contract SwapTest is Test {
     // ---- buying through the manager ----
 
     function test_createPoolStoresRouteAndBuyFillsPotInBtc() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         assertEq(mgr.swapRoute(p), _direct(500));
         vm.prank(buyer);
         mgr.buyTickets(p, _ids(1, 2), ref);
-        assertEq(usdt.balanceOf(treasury), 10e18);
-        assertEq(mgr.referralEarnings(ref, address(usdt)), 20e18);
-        assertEq(btc.balanceOf(p), uint256(170e18) / 60000);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
+        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
         assertEq(router.lastPath(), _direct(500));
         assertEq(
             usdt.balanceOf(address(mgr)) + usdt.balanceOf(address(swapper)), mgr.referralEarnings(ref, address(usdt))
@@ -252,22 +252,22 @@ contract SwapTest is Test {
     }
 
     function test_manipulatedPriceReverts() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         router.setRate(address(usdt), address(btc), 98, 100 * 60000); // spot pushed 2% below twap, cap is 1%
         vm.prank(buyer);
         vm.expectRevert(bytes("Too little received"));
         mgr.buyTickets(p, _ids(1, 2), ref);
         router.setIgnoreMin(true); // a router ignoring the min is still caught
-        uint256 min = swapper.minOut(_direct(500), 170e18);
+        uint256 min = swapper.minOut(_direct(500), 190e18);
         vm.prank(buyer);
         vm.expectRevert(
-            abi.encodeWithSelector(ISwapper.SWAP_OUTPUT_TOO_LOW.selector, min, uint256(170e18) * 98 / (100 * 60000))
+            abi.encodeWithSelector(ISwapper.SWAP_OUTPUT_TOO_LOW.selector, min, uint256(190e18) * 98 / (100 * 60000))
         );
         mgr.buyTickets(p, _ids(1, 2), ref);
     }
 
     function test_withinSlippagePasses() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         router.setRate(address(usdt), address(btc), 995, 1000 * 60000); // 0.5% worse than twap
         vm.prank(buyer);
         mgr.buyTickets(p, _ids(1, 2), ref);
@@ -275,7 +275,7 @@ contract SwapTest is Test {
     }
 
     function test_refreshRoute() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         MockV3Pool deep = new MockV3Pool();
         deep.set(btcPool.tick());
         deep.setLiquidity(1e24);
@@ -290,7 +290,7 @@ contract SwapTest is Test {
 
     function test_configChecks() public {
         vm.expectRevert(NATIVE_SWAP_UNSUPPORTED.selector);
-        mgr.createPool("X", _w(address(usdt), address(0)), 0, 0);
+        mgr.createPool("X", _w(address(usdt), address(0)));
         vm.expectRevert(INVALID_TWAP_WINDOW.selector);
         swapper.setTwapWindow(60);
         vm.expectRevert(INVALID_SLIPPAGE.selector);
@@ -311,13 +311,13 @@ contract SwapTest is Test {
             address(this), treasury, address(new Pool(address(coord), bytes32(0), 5)), address(coord), 5
         );
         vm.expectRevert(SWAPPER_NOT_SET.selector);
-        bare.createPool("X", _w(address(usdt), address(btc)), 0, 0);
+        bare.createPool("X", _w(address(usdt), address(btc)));
     }
 
     // ---- paying with another token ----
 
     function test_buyWithWbnbToken() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         wbnb.mint(buyer, 5e18);
         vm.startPrank(buyer);
         wbnb.approve(address(mgr), 5e18);
@@ -325,33 +325,33 @@ contract SwapTest is Test {
         vm.stopPrank();
         uint256 spent = (uint256(200e18) + 599) / 600;
         assertEq(wbnb.balanceOf(buyer), 5e18 - spent); // unspent refunded
-        assertEq(usdt.balanceOf(treasury), 10e18);
-        assertEq(mgr.referralEarnings(ref, address(usdt)), 20e18);
-        assertEq(btc.balanceOf(p), uint256(170e18) / 60000);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
+        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
         assertEq(Pool(payable(p)).ownerOf(1), buyer);
         _assertNothingLeft();
     }
 
     function test_buyWithNativeBnb() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         vm.deal(buyer, 1 ether);
         vm.prank(buyer);
         mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
         assertEq(buyer.balance, 1 ether - (uint256(200e18) + 599) / 600); // native refund
-        assertEq(btc.balanceOf(p), uint256(170e18) / 60000);
+        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
         _assertNothingLeft();
     }
 
     function test_buyWithSamePotCurrencyNoPotSwap() public {
-        address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)), 0, 0);
+        address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)));
         vm.deal(buyer, 1 ether);
         vm.prank(buyer);
         mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
-        assertEq(usdt.balanceOf(p), 170e18);
+        assertEq(usdt.balanceOf(p), 190e18);
     }
 
     function test_twoHopExactOutUsesReversedPath() public {
-        address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)), 0, 0);
+        address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)));
         MockV3Pool dogePool = new MockV3Pool();
         factory.add(address(doge), address(wbnb), 10000, address(dogePool));
         router.setRate(address(doge), address(usdt), 1, 10); // 1 doge = 0.1 usdt
@@ -367,7 +367,7 @@ contract SwapTest is Test {
     }
 
     function test_buyWithRejects() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)), 0, 0);
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         wbnb.mint(buyer, 5e18);
         vm.startPrank(buyer);
         wbnb.approve(address(mgr), 5e18);

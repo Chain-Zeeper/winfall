@@ -24,8 +24,7 @@ contract DistributeTest is Test {
         shares[1] = 3_000;
         shares[2] = 2_000;
         shares[3] = 1_000;
-        IPool.PoolConfig memory w =
-            IPool.PoolConfig(4, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days);
+        IPool.PoolConfig memory w = IPool.PoolConfig(4, shares, new uint16[](0), address(0), block.timestamp + 1 days);
         pool = PoolClone.make(new Pool(address(coord), bytes32(0), 1), address(this), w);
         for (uint160 i = 1; i <= 6; i++) {
             pool.safeMint(address(0x1000 + i), i);
@@ -107,7 +106,7 @@ contract DistributeTest is Test {
         Pool p = PoolClone.make(
             new Pool(address(coord), bytes32(0), 1),
             address(this),
-            IPool.PoolConfig(1, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(1, shares, new uint16[](0), address(0), block.timestamp + 1 days)
         );
         vm.expectRevert(IPool.WINNERS_NOT_PICKED.selector);
         p.distribute(1);

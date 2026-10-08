@@ -38,7 +38,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     /// a winfall has to stay open at least this long
     uint256 public constant MIN_WINFALL_DURATION = 1 days;
-    /// 100% in basis points for feeBps / referralBps (1 = 0.01%)
+    /// 100% in basis points (1 = 0.01%), feeBps and referralBps are both of the ticket price
     uint16 public constant FEE_DENOMINATOR = 10_000;
     uint16 public constant MAX_PROTOCOL_CUT = 5_000;
     /// receives the protocol fee (feeBps) of every ticket
@@ -72,7 +72,8 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         address indexed buyer,
         uint256[] ticketIds,
         uint256 paid,
-        uint256 protocolFee,
+        /// the whole protocol fee, referralCut is the part of it that went to the referrer
+        uint256 fee,
         address referrer,
         uint256 referralCut
     );
@@ -151,14 +152,15 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     /// @notice clones a new pool, initializes it with this manager as owner and registers it as a vrf consumer
     /// @param w fees / price / shares of the winfall, w.pool is ignored and set to the new clone
-    function createPool(string calldata symbol, Winfall calldata w, uint256 winfallAmount, uint256 threshold)
+    function createPool(string calldata symbol, Winfall calldata w)
         external
         onlyRole(POOL_CREATOR_ROLE)
         returns (address pool)
     {
         require(w.closeTime >= block.timestamp + MIN_WINFALL_DURATION, INVALID_CLOSE_TIME());
         require(w.ticketPrice > 0, INVALID_TICKET_PRICE());
-        require(w.feeBps <= MAX_PROTOCOL_CUT && uint256(w.feeBps) + w.referralBps <= FEE_DENOMINATOR, INVALID_FEES());
+        // the referral is paid out of the fee, so it can't be bigger than the fee
+        require(w.feeBps <= MAX_PROTOCOL_CUT && w.referralBps <= w.feeBps, INVALID_FEES());
         bytes memory route;
         if (w.paymentToken != w.currency) {
             // swapping only between erc20s, use wrapped tokens (wbnb, weth) for native value
@@ -168,7 +170,7 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
             route = swapper.findRoute(w.paymentToken, w.currency);
         }
 
-        pool = _deployPool(symbol, w, winfallAmount, threshold);
+        pool = _deployPool(symbol, w);
         VRF_COORDINATOR.addConsumer(vrfSubscriptionId, pool);
 
         _winfalls[pool] = w;
@@ -180,26 +182,17 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         emit PoolCreated(pool, w.name, w.closeTime);
     }
 
-    function _deployPool(string calldata symbol, Winfall calldata w, uint256 winfallAmount, uint256 threshold)
-        internal
-        returns (address pool)
-    {
+    function _deployPool(string calldata symbol, Winfall calldata w) internal returns (address pool) {
         pool = Clones.clone(poolImplementation);
-        IPool(pool).initialize(address(this), w.name, symbol, _poolConfig(w, winfallAmount, threshold));
+        IPool(pool).initialize(address(this), w.name, symbol, _poolConfig(w));
     }
 
-    function _poolConfig(Winfall calldata w, uint256 winfallAmount, uint256 threshold)
-        internal
-        pure
-        returns (IPool.PoolConfig memory)
-    {
+    function _poolConfig(Winfall calldata w) internal pure returns (IPool.PoolConfig memory) {
         return IPool.PoolConfig({
             totalWinners: w.winningShares.length,
             winnerShares: w.winningShares,
             difficultiesBps: w.difficultiesBps,
             currency: w.currency,
-            winfallAmount: winfallAmount,
-            threshold: threshold,
             closeTime: w.closeTime
         });
     }
@@ -224,6 +217,18 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         emit PotRolledOver(fromPool, toPool, amount);
     }
 
+    /// @notice second step of handing the vrf subscription to this manager: its current owner first calls
+    ///         requestSubscriptionOwnerTransfer(subId, manager) on the coordinator, then the admin calls this.
+    ///         the manager has to own the subscription to register pools as consumers
+    function acceptVrfSubscription() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        VRF_COORDINATOR.acceptSubscriptionOwnerTransfer(vrfSubscriptionId);
+    }
+
+    /// @notice offers the vrf subscription to `newOwner` (e.g. a new manager), who then has to accept it
+    function transferVrfSubscription(address newOwner) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        VRF_COORDINATOR.requestSubscriptionOwnerTransfer(vrfSubscriptionId, newOwner);
+    }
+
     /// @notice frees the pool's slot on the vrf subscription once its draw is done
     function releaseVrfConsumer(address pool) external onlyRole(POOL_CREATOR_ROLE) {
         require(_pool(pool).drawn(), WINFALL_STILL_OPEN());
@@ -245,8 +250,9 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     /// @notice buys the tickets numbered `ticketIds` of `pool` for msg.sender at the pool's ticketPrice each.
     ///         the whole batch reverts with TICKET_TAKEN if any id is already bought (check with pool.ticketExists first).
-    ///         paid in paymentToken: feeBps goes to feeTreasury, referralBps to the buyer's referrer (claimable with
-    ///         claimReferral, or into the pot if there's none), the rest into the pool's pot.
+    ///         paid in paymentToken: feeBps of the price is the protocol fee, the rest goes into the pool's pot.
+    ///         out of that fee the buyer's referrer gets referralBps of the price (claimable with claimReferral),
+    ///         the fee treasury gets what's left of it.
     ///         if the pot currency differs, the swapper swaps that rest into the pot currency straight into the pool
     ///         along the pool's stored route, reverting if the pool would get less than the twap fair amount.
     ///         native pools take exact msg.value, token pools need an approval of the full price.
@@ -339,13 +345,16 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         return referrer;
     }
 
-    /// @dev splits `total` paymentToken into protocol fee, referral cut and pot. `from` is the buyer (pull with an
-    ///      approval) or this contract (already holds it after a swap). native payments already arrived as msg.value.
-    ///      the referral cut stays here as claimable earnings, so a referrer that can't receive can't block purchases
+    /// @dev splits `total` paymentToken into the protocol fee and the pot, and the fee into the referrer's cut and
+    ///      the treasury's. `from` is the buyer (pull with an approval) or this contract (already holds it after a
+    ///      swap). native payments already arrived as msg.value. the referral cut stays here as claimable earnings,
+    ///      so a referrer that can't receive can't block purchases
     function _distribute(Winfall storage w, address pool, uint256 total, address from, address referrer) internal {
-        uint256 protocolFee = total * w.feeBps / FEE_DENOMINATOR;
+        uint256 fee = total * w.feeBps / FEE_DENOMINATOR;
+        uint256 toPot = total - fee;
+        // a share of the ticket price like the fee, but taken out of the fee, never out of the pot
         uint256 referralCut = referrer == address(0) ? 0 : total * w.referralBps / FEE_DENOMINATOR;
-        uint256 toPot = total - protocolFee - referralCut;
+        uint256 protocolFee = fee - referralCut;
 
         address payToken = w.paymentToken;
         if (referralCut > 0) {
@@ -385,12 +394,13 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
             IPool(pool).safeMint(msg.sender, ticketIds[i]);
         }
         address referrer = referrerOf[msg.sender];
+        uint256 fee = total * w.feeBps / FEE_DENOMINATOR;
         emit TicketsBought(
             pool,
             msg.sender,
             ticketIds,
             total,
-            total * w.feeBps / FEE_DENOMINATOR,
+            fee,
             referrer,
             referrer == address(0) ? 0 : total * w.referralBps / FEE_DENOMINATOR
         );

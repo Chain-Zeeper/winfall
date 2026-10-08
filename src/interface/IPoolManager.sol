@@ -11,10 +11,11 @@ struct Winfall {
     address paymentToken;
     /// what the pot holds and winners are paid in, address(0) = native
     address currency;
-    /// cut of every ticket sent to the fee treasury, in basis points (10_000 = 100%)
+    /// protocol fee: cut of every ticket that doesn't go into the pot, in basis points (10_000 = 100%)
     uint16 feeBps;
-    /// cut of every ticket for the buyer's referrer, in basis points (10_000 = 100%). goes to the pot when the buyer
-    /// has no referrer
+    /// what the buyer's referrer gets, in basis points of the ticket price like feeBps. it's taken out of the
+    /// protocol fee, so it can't be more than feeBps and the pot is the same with or without a referrer. the rest
+    /// of the fee, or all of it when the buyer has no referrer, goes to the fee treasury
     uint16 referralBps;
     /// tickets are sold until then
     uint256 closeTime;

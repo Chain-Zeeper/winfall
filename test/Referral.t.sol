@@ -45,10 +45,10 @@ contract ReferralTest is Test {
         w.paymentToken = currency;
         w.currency = currency;
         w.feeBps = 500;
-        w.referralBps = 1_000;
+        w.referralBps = 100;
         w.closeTime = block.timestamp + 2 days;
         w.winningShares = shares;
-        return mgr.createPool("R", w, 0, 0);
+        return mgr.createPool("R", w);
     }
 
     function _ids(uint256 a) internal pure returns (uint256[] memory r) {
@@ -65,6 +65,23 @@ contract ReferralTest is Test {
         assertEq(mgr.referrerOf(bob), address(0));
     }
 
+    /// the referral (1% of the price) is paid out of the protocol's 5% fee: the pot gets the same with or without a referrer
+    function test_referralComesOutOfTheFeeNotThePot() public {
+        address withRef = _pool(address(0));
+        address without = _pool(address(0));
+        vm.prank(bob);
+        mgr.buyTickets{value: 1 ether}(withRef, _ids(1), alice);
+        assertEq(withRef.balance, 0.95 ether);
+        assertEq(treasury.balance, 0.04 ether); // 5% fee minus alice's 1%
+        assertEq(mgr.referralEarnings(alice, address(0)), 0.01 ether);
+
+        vm.deal(carol, 1 ether);
+        vm.prank(carol);
+        mgr.buyTickets{value: 1 ether}(without, _ids(1), address(0));
+        assertEq(without.balance, 0.95 ether); // same pot
+        assertEq(treasury.balance, 0.04 ether + 0.05 ether); // the whole fee
+    }
+
     function test_firstReferrerSticks() public {
         address p = _pool(address(0));
         vm.prank(bob);
@@ -74,9 +91,9 @@ contract ReferralTest is Test {
         mgr.buyTickets{value: 1 ether}(p, _ids(2), carol);
         vm.prank(bob);
         mgr.buyTickets{value: 1 ether}(p, _ids(3), address(0));
-        assertEq(mgr.referralEarnings(alice, address(0)), 0.3 ether);
+        assertEq(mgr.referralEarnings(alice, address(0)), 0.03 ether); // 1% of 3 tickets
         assertEq(mgr.referralEarnings(carol, address(0)), 0);
-        assertEq(p.balance, 2.55 ether);
+        assertEq(p.balance, 2.85 ether);
     }
 
     function test_selfReferralIgnored() public {
@@ -99,10 +116,10 @@ contract ReferralTest is Test {
         vm.stopPrank();
 
         vm.startPrank(alice);
-        assertEq(mgr.claimReferral(address(0)), 0.1 ether);
-        assertEq(alice.balance, 0.1 ether);
-        assertEq(mgr.claimReferral(address(tok)), 0.1 ether); // bob's tie applies to every pool
-        assertEq(tok.balanceOf(alice), 0.1 ether);
+        assertEq(mgr.claimReferral(address(0)), 0.01 ether);
+        assertEq(alice.balance, 0.01 ether);
+        assertEq(mgr.claimReferral(address(tok)), 0.01 ether); // bob's tie applies to every pool
+        assertEq(tok.balanceOf(alice), 0.01 ether);
         vm.expectRevert(NOTHING_TO_CLAIM.selector);
         mgr.claimReferral(address(0));
         vm.stopPrank();
@@ -120,6 +137,6 @@ contract ReferralTest is Test {
         vm.prank(rej); // only the referrer is stuck
         vm.expectRevert();
         mgr.claimReferral(address(0));
-        assertEq(mgr.referralEarnings(rej, address(0)), 0.2 ether);
+        assertEq(mgr.referralEarnings(rej, address(0)), 0.02 ether);
     }
 }

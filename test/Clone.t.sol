@@ -15,7 +15,7 @@ contract CloneTest is Test {
         uint256[] memory shares = new uint256[](2);
         shares[0] = 6_000;
         shares[1] = 4_000;
-        cfg = IPool.PoolConfig(2, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days);
+        cfg = IPool.PoolConfig(2, shares, new uint16[](0), address(0), block.timestamp + 1 days);
     }
 
     function test_implementationIsLocked() public {

@@ -25,6 +25,20 @@ contract MockCoordSub {
         consumer[c] = false;
     }
 
+    // two step subscription ownership, like the real coordinator
+    address public subOwner;
+    address public pendingSubOwner;
+
+    function requestSubscriptionOwnerTransfer(uint256, address newOwner) external {
+        pendingSubOwner = newOwner;
+    }
+
+    function acceptSubscriptionOwnerTransfer(uint256) external {
+        require(msg.sender == pendingSubOwner, "not requested owner");
+        subOwner = msg.sender;
+        pendingSubOwner = address(0);
+    }
+
     function fulfill(address p, uint256 id, uint256 word) external {
         uint256[] memory w = new uint256[](1);
         w[0] = word;
@@ -54,7 +68,7 @@ contract ManagerTest is Test {
     }
 
     function test_createPoolClonesAndRegisters() public {
-        address p = mgr.createPool("WF1", _w(block.timestamp + 2 days), 10 ether, 0);
+        address p = mgr.createPool("WF1", _w(block.timestamp + 2 days));
         assertEq(Pool(payable(p)).owner(), address(mgr));
         assertEq(Pool(payable(p)).name(), "Winfall #1");
         assertEq(IPool(p).getConfig().totalWinners, 2);
@@ -66,7 +80,7 @@ contract ManagerTest is Test {
     }
 
     function test_fullRoundThroughManager() public {
-        address p = mgr.createPool("WF1", _w(block.timestamp + 2 days), 0, 0);
+        address p = mgr.createPool("WF1", _w(block.timestamp + 2 days));
         vm.prank(address(mgr));
         IPool(p).safeMint(address(0xA11CE), 1);
         vm.prank(address(mgr));
@@ -86,7 +100,7 @@ contract ManagerTest is Test {
 
     function test_rejects() public {
         vm.expectRevert(INVALID_CLOSE_TIME.selector);
-        mgr.createPool("X", _w(block.timestamp + 1 hours), 0, 0);
+        mgr.createPool("X", _w(block.timestamp + 1 hours));
         vm.expectRevert(abi.encodeWithSelector(UNKNOWN_POOL.selector, address(0xBAD)));
         mgr.requestWinners(address(0xBAD));
         Pool other = new Pool(address(coord), bytes32(0), 999);
@@ -94,7 +108,7 @@ contract ManagerTest is Test {
         mgr.setPoolImplementation(address(other));
         vm.prank(address(0xE71));
         vm.expectRevert();
-        mgr.createPool("X", _w(block.timestamp + 2 days), 0, 0);
+        mgr.createPool("X", _w(block.timestamp + 2 days));
     }
 
     function test_rolesCreatorsCanRunPoolsButNotAdminActions() public {
@@ -105,9 +119,9 @@ contract ManagerTest is Test {
         mgr.grantRole(creator, bob);
 
         vm.prank(alice);
-        address p1 = mgr.createPool("A", _w(block.timestamp + 2 days), 0, 0);
+        address p1 = mgr.createPool("A", _w(block.timestamp + 2 days));
         vm.prank(bob);
-        address p2 = mgr.createPool("B", _w(block.timestamp + 2 days), 0, 0);
+        address p2 = mgr.createPool("B", _w(block.timestamp + 2 days));
         assertEq(mgr.totalPools(), 2);
 
         // bob can run alice's pool too, roles are manager wide
@@ -137,6 +151,23 @@ contract ManagerTest is Test {
         mgr.revokeRole(creator, bob);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, bob, creator));
-        mgr.createPool("C", _w(block.timestamp + 2 days), 0, 0);
+        mgr.createPool("C", _w(block.timestamp + 2 days));
+    }
+
+    function test_vrfSubscriptionHandOver() public {
+        // the deployer offers the subscription to the manager, the manager's admin accepts
+        coord.requestSubscriptionOwnerTransfer(5, address(mgr));
+        vm.prank(address(0xE71));
+        vm.expectRevert(); // admin only
+        mgr.acceptVrfSubscription();
+        mgr.acceptVrfSubscription();
+        assertEq(coord.subOwner(), address(mgr));
+
+        // and the admin can offer it on, e.g. to a new manager
+        vm.prank(address(0xE71));
+        vm.expectRevert();
+        mgr.transferVrfSubscription(address(0xE71));
+        mgr.transferVrfSubscription(address(0x1234));
+        assertEq(coord.pendingSubOwner(), address(0x1234));
     }
 }

@@ -21,7 +21,7 @@ contract ClaimTest is Test {
 
     function _pool(uint256[] memory shares) internal returns (Pool p) {
         IPool.PoolConfig memory w =
-            IPool.PoolConfig(shares.length, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days);
+            IPool.PoolConfig(shares.length, shares, new uint16[](0), address(0), block.timestamp + 1 days);
         p = PoolClone.make(new Pool(address(coord), bytes32(0), 1), address(this), w);
     }
 
@@ -131,8 +131,7 @@ contract ClaimTest is Test {
         uint256[] memory shares = new uint256[](2);
         shares[0] = 10_000;
         shares[1] = 0;
-        IPool.PoolConfig memory w =
-            IPool.PoolConfig(2, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days);
+        IPool.PoolConfig memory w = IPool.PoolConfig(2, shares, new uint16[](0), address(0), block.timestamp + 1 days);
         Pool impl = new Pool(address(coord), bytes32(0), 1);
         vm.expectRevert(IPool.INVALID_WINNER_SHARES.selector);
         this.makeExt(impl, w);

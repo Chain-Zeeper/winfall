@@ -49,10 +49,10 @@ contract ForkBscTest is Test {
         w.paymentToken = pay;
         w.currency = pot;
         w.feeBps = 500;
-        w.referralBps = 1_000;
+        w.referralBps = 100;
         w.closeTime = block.timestamp + 2 days;
         w.winningShares = shares;
-        return mgr.createPool("F", w, 0, 0);
+        return mgr.createPool("F", w);
     }
 
     function _ids(uint256 a, uint256 b) internal pure returns (uint256[] memory r) {
@@ -77,7 +77,7 @@ contract ForkBscTest is Test {
     function test_fork_buyUsdtIntoBtcbPot() public {
         address p = _pool(USDT, BTCB);
         deal(USDT, buyer, 1_000e18);
-        uint256 minOut = swapper.minOut(mgr.swapRoute(p), 170e18);
+        uint256 minOut = swapper.minOut(mgr.swapRoute(p), 190e18);
         vm.startPrank(buyer);
         IERC20(USDT).approve(address(mgr), type(uint256).max);
         mgr.buyTickets(p, _ids(1, 2), ref);
@@ -86,9 +86,9 @@ contract ForkBscTest is Test {
         uint256 pot = IERC20(BTCB).balanceOf(p);
         console.log("170 USDT -> BTCB in pot", pot, "twap min (1% slippage)", minOut);
         assertGe(pot, minOut);
-        assertEq(IERC20(USDT).balanceOf(treasury), 10e18);
-        assertEq(mgr.referralEarnings(ref, USDT), 20e18);
-        assertEq(IERC20(USDT).balanceOf(address(mgr)), 20e18);
+        assertEq(IERC20(USDT).balanceOf(treasury), 8e18);
+        assertEq(mgr.referralEarnings(ref, USDT), 2e18);
+        assertEq(IERC20(USDT).balanceOf(address(mgr)), 2e18);
         assertEq(IERC20(USDT).balanceOf(address(swapper)), 0);
         assertEq(Pool(payable(p)).ownerOf(2), buyer);
     }
@@ -105,7 +105,7 @@ contract ForkBscTest is Test {
         assertGt(spent, 0); // refunded the rest
         assertLt(spent, 1 ether);
         assertGt(IERC20(BTCB).balanceOf(p), 0);
-        assertEq(mgr.referralEarnings(ref, USDT), 20e18);
+        assertEq(mgr.referralEarnings(ref, USDT), 2e18);
         assertEq(address(mgr).balance + address(swapper).balance, 0);
         assertEq(IERC20(WBNB).balanceOf(address(swapper)), 0);
     }
@@ -118,7 +118,7 @@ contract ForkBscTest is Test {
         mgr.buyTicketsWith(p, _ids(1, 2), BTCB, 0.1e18, block.timestamp + 60, address(0));
         vm.stopPrank();
         console.log("BTCB spent for 200 USDT of tickets", 1e18 - IERC20(BTCB).balanceOf(buyer));
-        assertEq(IERC20(USDT).balanceOf(p), 190e18); // no referrer: 10% goes to the pot
+        assertEq(IERC20(USDT).balanceOf(p), 190e18); // 5% fee, the rest is the pot
         assertEq(IERC20(BTCB).balanceOf(address(mgr)) + IERC20(BTCB).balanceOf(address(swapper)), 0);
     }
 
@@ -131,6 +131,6 @@ contract ForkBscTest is Test {
         vm.stopPrank();
         vm.prank(ref);
         mgr.claimReferral(USDT);
-        assertEq(IERC20(USDT).balanceOf(ref), 20e18);
+        assertEq(IERC20(USDT).balanceOf(ref), 2e18);
     }
 }

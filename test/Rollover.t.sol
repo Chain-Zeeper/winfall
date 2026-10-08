@@ -46,7 +46,7 @@ contract RolloverTest is Test {
             address(this),
             "P",
             "P",
-            IPool.PoolConfig(3, _arr(5_000, 3_000, 2_000), difficulties, address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(3, _arr(5_000, 3_000, 2_000), difficulties, address(0), block.timestamp + 1 days)
         );
         coord.addConsumer(5, address(p));
     }
@@ -197,6 +197,86 @@ contract RolloverTest is Test {
         assertLt(won[2], 55);
     }
 
+    /// 1000 real draws with 5 positions at 0 / 25 / 50 / 75 / 90% difficulty: every position is won at its
+    /// expected rate (within ~3.5 standard deviations), and a harder position is won less often than an easier one
+    function test_difficultySweep() public {
+        uint16[5] memory difficulty = [uint16(0), 2_500, 5_000, 7_500, 9_000];
+        uint256[] memory shares = new uint256[](5);
+        uint16[] memory d = new uint16[](5);
+        for (uint256 i; i < 5; i++) {
+            shares[i] = 2_000;
+            d[i] = difficulty[i];
+        }
+
+        uint256 runs = 1000;
+        uint256[5] memory won;
+        uint256 noWinnerAtAll;
+        for (uint256 s; s < runs; s++) {
+            Pool p = Pool(payable(Clones.clone(address(impl))));
+            p.initialize(address(this), "P", "P", IPool.PoolConfig(5, shares, d, address(0), block.timestamp + 1 days));
+            coord.addConsumer(5, address(p));
+            _mint(p, 6); // enough for all 5 positions
+            if (_draw(p, uint256(keccak256(abi.encode("sweep", s)))).length == 0) noWinnerAtAll++;
+            uint256[] memory pos = _positions(p);
+            for (uint256 k; k < pos.length; k++) {
+                won[pos[k]]++;
+            }
+        }
+
+        for (uint256 i; i < 5; i++) {
+            uint256 expected = runs * (10_000 - difficulty[i]) / 10_000;
+            emit log_named_uint(string.concat("difficulty ", vm.toString(difficulty[i]), " bps, won of 1000"), won[i]);
+            if (difficulty[i] == 0) {
+                assertEq(won[i], runs); // never misses
+            } else {
+                assertApproxEqAbs(won[i], expected, 50); // 3.5 sd at p = 0.5 is ~55, tighter at the edges
+            }
+            if (i > 0) assertLt(won[i], won[i - 1]); // harder is won less
+        }
+        assertEq(noWinnerAtAll, 0); // the 0% position always has a winner
+        emit log_named_uint("expected 90% difficulty wins", runs / 10);
+    }
+
+    /// difficulty doesn't depend on how many tickets sold: 1 ticket or 30, a 50% position is won about half the time
+    function test_difficultyIndependentOfTicketCount() public {
+        uint256[2] memory sizes = [uint256(1), 30];
+        for (uint256 t; t < 2; t++) {
+            uint256 won;
+            for (uint256 s; s < 300; s++) {
+                Pool p = _pool(_diff(5_000, 5_000, 5_000));
+                _mint(p, sizes[t]);
+                _draw(p, uint256(keccak256(abi.encode("tickets", t, s))));
+                uint256[] memory pos = _positions(p);
+                if (pos.length > 0 && pos[0] == 0) won++; // 1st place was won
+            }
+            emit log_named_uint(string.concat("1st place won of 300 with ", vm.toString(sizes[t]), " tickets"), won);
+            assertApproxEqAbs(won, 150, 30); // ~3.5 sd
+        }
+    }
+
+    /// a position whose roll lands exactly on the difficulty is won, one below it misses
+    function test_missRollBoundary() public {
+        Pool p = _pool(_diff(9_000, 0, 0));
+        _mint(p, 5);
+        uint256 seed;
+        // find a seed whose 1st place roll is exactly 9000 (just not a miss) to pin the comparison
+        while (uint256(keccak256(abi.encode(seed, "miss", uint256(0)))) % 10_000 != 9_000) {
+            seed++;
+        }
+        _draw(p, seed);
+        assertEq(_positions(p)[0], 0); // roll 9000 is not < 9000: 1st place is won
+
+        Pool q = _pool(_diff(9_001 - 1, 0, 0));
+        _mint(q, 5);
+        uint256 seed2;
+        while (uint256(keccak256(abi.encode(seed2, "miss", uint256(0)))) % 10_000 != 8_999) {
+            seed2++;
+        }
+        _draw(q, seed2);
+        uint256[] memory pos = _positions(q);
+        assertTrue(pos.length == 0 || pos[0] != 0); // roll 8999 < 9000: 1st place misses
+    }
+
     function testFuzz_winnersDistinctAndAmountsAddUp(uint256 seed, uint8 t, uint16 d0, uint16 d1, uint16 d2) public {
         uint16[] memory d = _diff(uint16(bound(d0, 0, 9_000)), uint16(bound(d1, 0, 9_000)), uint16(bound(d2, 0, 9_000)));
         Pool p = _pool(d);
@@ -283,27 +363,23 @@ contract RolloverTest is Test {
         uint256[] memory shares = _arr(5_000, 3_000, 2_000);
         uint16[] memory two = new uint16[](2);
         vm.expectRevert(IPool.INVALID_DIFFICULTIES.selector); // one difficulty per position
-        p.initialize(
-            address(this), "P", "P", IPool.PoolConfig(3, shares, two, address(0), 0, 0, block.timestamp + 1 days)
-        );
+        p.initialize(address(this), "P", "P", IPool.PoolConfig(3, shares, two, address(0), block.timestamp + 1 days));
         vm.expectRevert(IPool.INVALID_DIFFICULTIES.selector); // above the 90% cap
         p.initialize(
             address(this),
             "P",
             "P",
-            IPool.PoolConfig(3, shares, _diff(0, 0, 9_001), address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(3, shares, _diff(0, 0, 9_001), address(0), block.timestamp + 1 days)
         );
         vm.expectRevert(IPool.INVALID_WINNER_SHARES.selector); // shares have to add up to 10_000 bps
         p.initialize(
             address(this),
             "P",
             "P",
-            IPool.PoolConfig(3, _arr(5_000, 3_000, 200), new uint16[](0), address(0), 0, 0, block.timestamp + 1 days)
+            IPool.PoolConfig(3, _arr(5_000, 3_000, 200), new uint16[](0), address(0), block.timestamp + 1 days)
         );
         vm.expectRevert(IPool.INVALID_CLOSE_TIME.selector);
-        p.initialize(
-            address(this), "P", "P", IPool.PoolConfig(3, shares, new uint16[](0), address(0), 0, 0, block.timestamp)
-        );
+        p.initialize(address(this), "P", "P", IPool.PoolConfig(3, shares, new uint16[](0), address(0), block.timestamp));
     }
 
     // ---- rollover through the manager ----
@@ -335,7 +411,7 @@ contract RolloverTest is Test {
 
     /// pool with one 90% hard position, one ticket sold, drawn without a winner: 1 ether rollable
     function _unwonPool() internal returns (address p) {
-        p = mgr.createPool("A", _winfall(address(0), 9_000), 0, 0);
+        p = mgr.createPool("A", _winfall(address(0), 9_000));
         address buyer = address(0xA11CE);
         vm.deal(buyer, 1 ether);
         vm.prank(buyer);
@@ -348,7 +424,7 @@ contract RolloverTest is Test {
     function test_managerRollsUnwonPotIntoNextPool() public {
         address a = _unwonPool();
         assertEq(IPool(a).rolloverAmount(), 1 ether);
-        address b = mgr.createPool("B", _winfall(address(0), 0), 0, 0);
+        address b = mgr.createPool("B", _winfall(address(0), 0));
 
         assertEq(mgr.rollover(a, b), 1 ether);
         assertEq(a.balance, 0);
@@ -369,8 +445,8 @@ contract RolloverTest is Test {
     function test_rolloverCanOnlyGoIntoAnotherOpenPoolOfTheSameCurrency() public {
         address a = _unwonPool();
         RollTok tok = new RollTok();
-        address tokenPool = mgr.createPool("T", _winfall(address(tok), 0), 0, 0);
-        address drawnPool = mgr.createPool("D", _winfall(address(0), 0), 0, 0);
+        address tokenPool = mgr.createPool("T", _winfall(address(tok), 0));
+        address drawnPool = mgr.createPool("D", _winfall(address(0), 0));
         vm.warp(IPool(drawnPool).getConfig().closeTime);
         mgr.requestWinners(drawnPool); // no tickets: drawn right away
 
@@ -386,7 +462,7 @@ contract RolloverTest is Test {
         vm.expectRevert("pot locked until winners are paid and the rest rolled over"); // the admin can't take it
         mgr.rescuePoolFunds(a, address(0), address(this), 1 ether);
 
-        address open = mgr.createPool("B", _winfall(address(0), 0), 0, 0);
+        address open = mgr.createPool("B", _winfall(address(0), 0));
         vm.prank(address(0xBAD));
         vm.expectRevert(); // needs the pool creator role
         mgr.rollover(a, open);
@@ -395,7 +471,7 @@ contract RolloverTest is Test {
     }
 
     function test_vrfSlotReleasedOnlyAfterTheDraw() public {
-        address p = mgr.createPool("A", _winfall(address(0), 0), 0, 0);
+        address p = mgr.createPool("A", _winfall(address(0), 0));
         vm.expectRevert(WINFALL_STILL_OPEN.selector);
         mgr.releaseVrfConsumer(p);
         vm.warp(IPool(p).getConfig().closeTime);

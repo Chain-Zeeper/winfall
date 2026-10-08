@@ -27,8 +27,7 @@ contract RetryTest is Test {
         coord = new MockCoord();
         uint256[] memory shares = new uint256[](1);
         shares[0] = 10_000;
-        IPool.PoolConfig memory w =
-            IPool.PoolConfig(1, shares, new uint16[](0), address(0), 0, 0, block.timestamp + 1 days);
+        IPool.PoolConfig memory w = IPool.PoolConfig(1, shares, new uint16[](0), address(0), block.timestamp + 1 days);
         pool = PoolClone.make(new Pool(address(coord), bytes32(0), 1), address(this), w);
         pool.safeMint(address(0xA1), 1);
         pool.safeMint(address(0xB2), 2);
