@@ -11,7 +11,6 @@ import {Winfall, IPoolManager} from "./interface/IPoolManager.sol";
 import {IPool} from "./interface/IPool.sol";
 import {Pool} from "./Pool.sol";
 
-error INVALID_CLOSE_TIME();
 error INVALID_ROLLOVER_TARGET();
 error LENGTH_MISMATCH();
 error AIRDROP_LIMIT(uint256 left, uint256 requested);
@@ -40,8 +39,6 @@ error NOTHING_TO_CLAIM();
 contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     bytes32 public constant POOL_CREATOR_ROLE = keccak256("POOL_CREATOR_ROLE");
 
-    /// a winfall has to stay open at least this long
-    uint256 public constant MIN_WINFALL_DURATION = 1 days;
     /// 100% in basis points (1 = 0.01%), feeBps and referralBps are both of the ticket price
     uint16 public constant FEE_DENOMINATOR = 10_000;
     uint16 public constant MAX_PROTOCOL_CUT = 5_000;
@@ -167,7 +164,6 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         onlyRole(POOL_CREATOR_ROLE)
         returns (address pool)
     {
-        require(w.closeTime >= block.timestamp + MIN_WINFALL_DURATION, INVALID_CLOSE_TIME());
         require(w.ticketPrice > 0, INVALID_TICKET_PRICE());
         // the referral is paid out of the fee, so it can't be bigger than the fee
         require(w.feeBps <= MAX_PROTOCOL_CUT && w.referralBps <= w.feeBps, INVALID_FEES());

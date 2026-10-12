@@ -4,7 +4,7 @@ import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import {Pool} from "../src/Pool.sol";
-import {PoolManager, INVALID_CLOSE_TIME, UNKNOWN_POOL, VRF_CONFIG_MISMATCH} from "../src/PoolManager.sol";
+import {PoolManager, UNKNOWN_POOL, VRF_CONFIG_MISMATCH} from "../src/PoolManager.sol";
 import {Winfall} from "../src/interface/IPoolManager.sol";
 import {IPool} from "../src/interface/IPool.sol";
 
@@ -99,8 +99,11 @@ contract ManagerTest is Test {
     }
 
     function test_rejects() public {
-        vm.expectRevert(INVALID_CLOSE_TIME.selector);
-        mgr.createPool("X", _w(block.timestamp + 1 hours));
+        vm.expectRevert(IPool.INVALID_CLOSE_TIME.selector); // has to be in the future
+        mgr.createPool("X", _w(block.timestamp));
+        // no minimum duration: a pool can be open for a few minutes
+        address quick = mgr.createPool("X", _w(block.timestamp + 5 minutes));
+        assertTrue(IPool(quick).isOpen());
         vm.expectRevert(abi.encodeWithSelector(UNKNOWN_POOL.selector, address(0xBAD)));
         mgr.requestWinners(address(0xBAD));
         Pool other = new Pool(address(coord), bytes32(0), 999);

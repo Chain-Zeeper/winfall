@@ -150,6 +150,16 @@ cast wallet import deployer --interactive  # keeps the key in an encrypted keyst
 source .env
 ```
 
+**The whole deployment in one command:**
+
+```shell
+script/deploy.sh bsc_testnet deployer    # network, keystore account
+```
+
+[deploy.sh](script/deploy.sh) creates the VRF subscription, reads its real id from the transaction, deploys the contracts and hands the subscription to the manager. It runs the two Forge scripts below one after the other, so it asks for the keystore password twice. `ADMIN`, `FEE_TREASURY` and `VRF_FUND_LINK` work the same as for `Deploy.s.sol`. It needs `python3`.
+
+The steps it runs, if you'd rather do them by hand:
+
 **1. Create a Chainlink VRF subscription** owned by the deployer, either at [vrf.chain.link](https://vrf.chain.link) or with the script:
 
 ```shell
@@ -176,7 +186,7 @@ VRF_SUBSCRIPTION_ID=<id> forge script script/Deploy.s.sol --rpc-url bsc_testnet 
 POOL_MANAGER=<manager> forge script script/CreatePool.s.sol --rpc-url bsc_testnet --broadcast --account deployer
 ```
 
-Defaults: a native BNB pool, 0.001 BNB per ticket, prizes 70% / 30%, open for 1 day and 10 minutes. Price, tokens, shares, difficulties and duration are set with the env vars listed at the top of [CreatePool.s.sol](script/CreatePool.s.sol).
+Defaults: a native BNB pool, 0.001 BNB per ticket, prizes 70% / 30%, open for 1 day. There's no minimum duration, `closeTime` only has to be in the future, so `DURATION=600` gives a 10 minute pool for a quick testnet round. Price, tokens, shares, difficulties and duration are set with the env vars listed at the top of [CreatePool.s.sol](script/CreatePool.s.sol).
 
 **On mainnet:**
 - Set `VRF_COORDINATOR` and `VRF_KEY_HASH` from Chainlink's documentation for BNB Chain and check them on-chain; they aren't hard-coded.
