@@ -11,7 +11,6 @@ import {IV3SwapRouter} from "./interface/IV3SwapRouter.sol";
 import {V3TwapOracle} from "./libraries/V3TwapOracle.sol";
 
 error INVALID_TWAP_WINDOW();
-error INVALID_SLIPPAGE();
 error INVALID_ROUTE();
 error ZERO_ADDRESS();
 error WRONG_NATIVE_AMOUNT(uint256 expected, uint256 sent);
@@ -23,16 +22,14 @@ interface IWrappedNative {
     function withdraw(uint256 amount) external;
 }
 
-/// @notice swaps on pancakeswap v3 with routes found on chain and every swap checked against the route's twap.
+/// @notice pancakeswap v3 for PoolManager: routes found on chain, twap quotes along a route, and exact output swaps
+///         whose cost is paid (and limited) by the caller.
 /// @dev routing: the direct pool if one exists, otherwise tokenIn -> hub -> tokenOut through the first hub (in
 ///      order) that has both pools. per pair the fee tier with the highest time weighted liquidity over the twap
 ///      window wins, so liquidity added for a single block can't steer the choice. pools too young to cover the
 ///      window are skipped, their twap isn't usable yet.
 ///      holds no funds between calls: it pulls from the caller, swaps and sends the output straight to the recipient
 contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
-    /// cap for maxSlippageBps
-    uint16 public constant MAX_SLIPPAGE_CAP = 1_000;
-    uint16 public constant BPS = 10_000;
     uint32 public constant MIN_TWAP_WINDOW = 5 minutes;
     uint32 public constant MAX_TWAP_WINDOW = 1 days;
 
@@ -43,14 +40,11 @@ contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
 
     /// intermediate tokens tried when there's no direct pool (e.g. wbnb, usdt), in priority order
     address[] public hubs;
-    /// twap window every swap is checked against, also the window time weighted liquidity is measured over
+    /// window of the twap quotes, also the window time weighted liquidity is measured over
     uint32 public twapWindow = 30 minutes;
-    /// how far below the twap amount a swap may land, in bps
-    uint16 public maxSlippageBps = 100;
 
     event HubsSet(address[] hubs);
     event TwapWindowSet(uint32 window);
-    event MaxSlippageSet(uint16 bps);
 
     /// @param router pancakeswap v3 SmartRouter, @param factory pancakeswap v3 factory of the same deployment
     constructor(address initialOwner, address router, address factory, address wrappedNative, address[] memory _hubs)
@@ -75,12 +69,6 @@ contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
         require(window >= MIN_TWAP_WINDOW && window <= MAX_TWAP_WINDOW, INVALID_TWAP_WINDOW());
         twapWindow = window;
         emit TwapWindowSet(window);
-    }
-
-    function setMaxSlippage(uint16 bps) external onlyOwner {
-        require(bps <= MAX_SLIPPAGE_CAP, INVALID_SLIPPAGE());
-        maxSlippageBps = bps;
-        emit MaxSlippageSet(bps);
     }
 
     function getHubs() external view returns (address[] memory) {
@@ -127,40 +115,15 @@ contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
 
     // ---- swapping ----
 
-    function minOut(bytes calldata route, uint256 amountIn) public view returns (uint256) {
+    /// @notice what amountIn of the route's first token is worth in its last token at the twap over twapWindow.
+    ///         no trading fee, no price impact and no slippage margin in it: it's a price, not a swap result. it
+    ///         can't be moved within one transaction, unlike the pools' current price
+    function quote(bytes calldata route, uint256 amountIn) external view returns (uint256) {
         _checkRoute(route);
-        uint256 fairOut = V3TwapOracle.quotePath(FACTORY, route, amountIn, twapWindow);
-        return fairOut * (BPS - maxSlippageBps) / BPS;
+        return V3TwapOracle.quotePath(FACTORY, route, amountIn, twapWindow);
     }
 
-    /// @dev the output is checked against the route's twap, so a sandwich (pushing the spot price before the swap)
-    ///      can't make the recipient get less than fair: it just reverts
-    function swap(bytes calldata route, uint256 amountIn, address recipient)
-        external
-        nonReentrant
-        returns (uint256 amountOut)
-    {
-        uint256 min = minOut(route, amountIn);
-        IERC20 tokenIn = IERC20(address(bytes20(route[:20])));
-        IERC20 tokenOut = IERC20(address(bytes20(route[route.length - 20:])));
-        uint256 before = tokenOut.balanceOf(recipient);
-
-        SafeERC20.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
-        SafeERC20.forceApprove(tokenIn, address(ROUTER), amountIn);
-        ROUTER.exactInput(
-            IV3SwapRouter.ExactInputParams({
-                path: route, recipient: recipient, amountIn: amountIn, amountOutMinimum: min
-            })
-        );
-        SafeERC20.forceApprove(tokenIn, address(ROUTER), 0);
-
-        // measure what actually arrived instead of trusting the router's return value
-        amountOut = tokenOut.balanceOf(recipient) - before;
-        require(amountOut >= min, SWAP_OUTPUT_TOO_LOW(min, amountOut));
-        emit Swapped(recipient, route, amountIn, amountOut, min);
-    }
-
-    /// @dev the input side is the caller's money, protected by their own maxAmountIn, so there's no twap check here
+    /// @dev the input side is the caller's money and maxAmountIn their limit, so a pushed price only costs them more
     function swapExactOut(
         address tokenIn,
         address tokenOut,
@@ -171,7 +134,10 @@ contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
     ) external payable nonReentrant returns (uint256 amountIn) {
         bool native = tokenIn == address(0);
         IERC20 input = IERC20(native ? WRAPPED_NATIVE : tokenIn);
-        bytes memory route = findRoute(address(input), tokenOut);
+        bytes memory route;
+        if (address(input) != tokenOut) {
+            route = findRoute(address(input), tokenOut);
+        }
 
         if (native) {
             require(msg.value == maxAmountIn, WRONG_NATIVE_AMOUNT(maxAmountIn, msg.value));
@@ -182,13 +148,20 @@ contract PancakeV3Swapper is ISwapper, Ownable, ReentrancyGuard {
         }
 
         uint256 before = IERC20(tokenOut).balanceOf(recipient);
-        SafeERC20.forceApprove(input, address(ROUTER), maxAmountIn);
-        amountIn = ROUTER.exactOutput(
-            IV3SwapRouter.ExactOutputParams({
-                path: _reverse(route), recipient: recipient, amountOut: amountOut, amountInMaximum: maxAmountIn
-            })
-        );
-        SafeERC20.forceApprove(input, address(ROUTER), 0);
+        if (address(input) == tokenOut) {
+            // native paid into its wrapped token: nothing to swap
+            require(amountOut <= maxAmountIn, SWAP_INPUT_TOO_HIGH(maxAmountIn, amountOut));
+            amountIn = amountOut;
+            SafeERC20.safeTransfer(input, recipient, amountOut);
+        } else {
+            SafeERC20.forceApprove(input, address(ROUTER), maxAmountIn);
+            amountIn = ROUTER.exactOutput(
+                IV3SwapRouter.ExactOutputParams({
+                    path: _reverse(route), recipient: recipient, amountOut: amountOut, amountInMaximum: maxAmountIn
+                })
+            );
+            SafeERC20.forceApprove(input, address(ROUTER), 0);
+        }
         uint256 received = IERC20(tokenOut).balanceOf(recipient) - before;
         require(received >= amountOut, SWAP_OUTPUT_TOO_LOW(amountOut, received));
 

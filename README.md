@@ -31,7 +31,7 @@ Built with [Foundry](https://book.getfoundry.sh/).
            |                                            |         |
            v                                            |         |
          PancakeV3Swapper --> PancakeSwap V3 -----------+         |
-         (TWAP-checked swap, output sent to the pool)             |
+         (pot amount priced at TWAP, bought by the buyer)         |
                                                                   |
   Chainlink VRF ------------- random seed ------------------------+
 ```
@@ -71,22 +71,29 @@ Built with [Foundry](https://book.getfoundry.sh/).
 ## Buying tickets
 
 ```solidity
-// pay in the pool's paymentToken (e.g. USDT): cheapest path, no buyer-side swap
+// pools whose pot is in the payment token (USDT tickets, USDT pot): pay in that token, no swap
 buyTickets(pool, ticketIds, referrer)
 
-// pay with any routable token, or native BNB (tokenIn = address(0), msg.value = maxAmountIn)
+// any pool, paying with any routable token or native BNB (tokenIn = address(0), msg.value = maxAmountIn).
+// the only way into pools whose pot is in another currency, also when paying in the payment token itself
 buyTicketsWith(pool, ticketIds, tokenIn, maxAmountIn, deadline, referrer)
 ```
 
 - **Price:** `ticketPrice × ticketIds.length`, in the pool's `paymentToken`.
-- **`buyTicketsWith`:** swaps exactly the price into `paymentToken` (an exact-output swap) and refunds whatever of `maxAmountIn` wasn't needed straight to the buyer. The buyer's `maxAmountIn` and `deadline` are their slippage protection, so quote the amount off-chain (for example with the PancakeSwap Quoter) and add a small buffer.
+- **`buyTicketsWith`** takes up to `maxAmountIn` of `tokenIn`, buys exactly what the purchase owes with it (exact-output swaps), and refunds the rest straight to the buyer. `maxAmountIn` and `deadline` are the buyer's protection, so quote off-chain (for example with the PancakeSwap Quoter) and add a small margin.
+
+**Pools whose pot is in another currency** (USDT tickets, BTCB pot):
+- **The pot is owed a fixed amount:** the BTCB that the pot's part of the price (the price minus the fee) is worth at the TWAP (`swapper.quote` along the pool's route). The protocol is owed its fee in USDT.
+- **The buyer's payment buys exactly those two amounts.** A part already in the right token isn't swapped: paying in USDT only buys the BTCB, paying in BTCB only buys the fee's USDT, paying in BNB buys both.
+- **The pot always gets its full amount,** whatever the market does during the purchase. A pushed or moved price only changes what the buyer pays, so purchases can't be blocked by price moves; they only stop at the buyer's own `maxAmountIn`.
+- **The ticket costs about its nominal price, not exactly:** the fee part is exact, the pot part costs what that BTCB costs on the market right now, including PancakeSwap's trading fee. On a mainnet fork, 2 tickets at 100 USDT cost 200.04 USDT.
 
 **Where the payment goes:**
 
 | Share of the ticket price | Destination |
 |---|---|
 | `feeBps` | the protocol fee. Out of it, on a buyer's first referred purchase, `referralBps` of the ticket price goes to the referrer, as earnings they claim with `claimReferral(token)`. What's left of the fee, or all of it when no referral is paid, goes to `feeTreasury`. |
-| the rest | the pool's pot. If the pot currency differs from `paymentToken`, it's swapped through the swapper directly into the pool. |
+| the rest | the pool's pot. In a pool whose pot is in another currency, the pot instead gets the TWAP value of this part in that currency (see above). |
 
 Both are in basis points of the ticket price (`10_000` is 100%). `feeBps` is capped at `MAX_PROTOCOL_CUT` (50%), and `referralBps` can't be more than `feeBps`, because the referral is paid out of the fee.
 
@@ -106,22 +113,21 @@ A pool creator can give away free tickets with `PoolManager.airdrop(pool, to[], 
 - **Limited by the money seeded into the pot:** airdropped tickets can be worth as much as the seeded money, counted at the ticket price. A 1 BNB seed with 0.01 BNB tickets allows 100 free tickets. `PoolManager.airdropsLeft(pool)` returns how many are available right now, and `seededPot(pool)` the seeded amount.
 - **Every free ticket is backed by seeded money,** the way a bought ticket is backed by its price. A seeded pool can airdrop before its first sale, and seeding more allows more.
 - **Ticket sales and rolled-over money add no allowance.** That's the players' money. The manager records both per pool (`soldIntoPot`, `rolledIn`); whatever else is in the pot counts as seeded.
-- **Pots in another currency** than the tickets (USDT tickets, BTCB pot) are valued in the ticket's token at the swapper's TWAP, minus its slippage margin.
+- **Pots in another currency** than the tickets (USDT tickets, BTCB pot) are valued in the ticket's token at the swapper's TWAP.
 - **Airdropped tickets are ordinary tickets:** they take part in the draw and can win. `Pool` counts them in `ticketsAirdropped`, separately from `ticketsSold`.
 - **Same rules as buying:** only while the pool is open, and a taken ticket number is rejected. A batch that would cross the limit reverts as a whole.
 
 ## Swaps and price protection
 
-Pot swaps spend the pot's money, not the buyer's, so the buyer has no reason to protect them. `PancakeV3Swapper` therefore checks every pot swap against an independent price:
+Every swap spends the buyer's own money and is an exact-output swap limited by the buyer's `maxAmountIn`, so a buyer can't take value from the pot by moving prices: it only makes their own purchase cost more.
 
-- **Price reference:** the TWAP of the route's pools over `twapWindow` (default 30 minutes), not the current price. The current price can be moved within a single transaction, for example with a flash loan, so checking against it would protect nothing.
-- **Minimum output:** at least `twapQuote × (1 − maxSlippageBps)`, default 1%. The contract measures what the pool actually received, not what the router reports.
+- **What the pot is owed comes from a TWAP,** the average price of the route's pools over `twapWindow` (default 30 minutes), not the current price. The current price can be moved within a single transaction, for example with a flash loan; the average can't. Shifting it means holding a pool's price off for many blocks against arbitrage.
+- **The TWAP lags fast moves.** Right after BTCB jumps, a ticket briefly costs a little more than nominal; right after it drops, a little less. The size is the market's move over the window.
 - **Route finding:**
   - It uses the direct pool if one exists, picking the fee tier (0.01% / 0.05% / 0.25% / 1%) with the highest **time-weighted** liquidity over the TWAP window.
   - Otherwise it routes through the first hub token (for example WBNB, then USDT) that has pools on both sides.
   - Pools whose price history doesn't cover the window are skipped.
-- **Routes are fixed per pool** when the pool is created. Buyers can't influence them. A pool creator can update one with `refreshSwapRoute(pool)`.
-- **Buyer-side swaps** in `buyTicketsWith` are found at purchase time and aren't TWAP-checked. They spend the buyer's own money, limited by the buyer's `maxAmountIn`.
+- **The route a pool's pot amount is priced along is fixed** when the pool is created, so buyers can't influence it. A pool creator can update it with `refreshSwapRoute(pool)`. The swaps that pay for a purchase are routed at purchase time.
 
 Native BNB can't be a swap input or output in a pool's configuration; use WBNB. Paying in native BNB through `buyTicketsWith` is supported, because the swapper wraps it.
 
@@ -131,7 +137,7 @@ Native BNB can't be a swap input or output in a pool's configuration; use WBNB. 
 |---|---|
 | `DEFAULT_ADMIN_ROLE` on `PoolManager` | Grant and revoke roles; `setPoolImplementation`, `setSwapper`, `setFeeTreasury`, `rescuePoolFunds`, `acceptVrfSubscription`, `transferVrfSubscription`. |
 | `POOL_CREATOR_ROLE` on `PoolManager` (any number of accounts) | `createPool`, `requestWinners`, `rollover`, `airdrop`, `releaseVrfConsumer`, `refreshSwapRoute`, `setPoolBaseURI`. |
-| Owner of `PancakeV3Swapper` | `setHubs`, `setTwapWindow` (5 minutes to 1 day), `setMaxSlippage` (at most 10%). |
+| Owner of `PancakeV3Swapper` | `setHubs`, `setTwapWindow` (5 minutes to 1 day). |
 | Anyone | Buy tickets, `pickWinners`, `distribute`; winners `claim`; referrers `claimReferral`. |
 
 `PoolManager` is the owner of every pool, so owner-only pool functions are reached through the manager.

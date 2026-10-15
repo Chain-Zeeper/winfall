@@ -77,15 +77,18 @@ contract ForkBscTest is Test {
     function test_fork_buyUsdtIntoBtcbPot() public {
         address p = _pool(USDT, BTCB);
         deal(USDT, buyer, 1_000e18);
-        uint256 minOut = swapper.minOut(mgr.swapRoute(p), 190e18);
+        // the pot is owed the btcb that 190 usdt are worth at the twap, the buyer pays what that costs on the market
+        uint256 owed = swapper.quote(mgr.swapRoute(p), 190e18);
         vm.startPrank(buyer);
         IERC20(USDT).approve(address(mgr), type(uint256).max);
-        mgr.buyTickets(p, _ids(1, 2), ref);
+        mgr.buyTicketsWith(p, _ids(1, 2), USDT, 250e18, block.timestamp + 60, ref);
         vm.stopPrank();
 
-        uint256 pot = IERC20(BTCB).balanceOf(p);
-        console.log("170 USDT -> BTCB in pot", pot, "twap min (1% slippage)", minOut);
-        assertGe(pot, minOut);
+        uint256 spent = 1_000e18 - IERC20(USDT).balanceOf(buyer);
+        console.log("BTCB owed to the pot (twap of 190 USDT)", owed);
+        console.log("USDT the buyer paid for 2 tickets of 100", spent);
+        assertEq(IERC20(BTCB).balanceOf(p), owed);
+        assertApproxEqRel(spent, 200e18, 0.02e18); // fee + the btcb at market, within 2% of the nominal price
         assertEq(IERC20(USDT).balanceOf(treasury), 8e18);
         assertEq(mgr.referralEarnings(ref, USDT), 2e18);
         assertEq(IERC20(USDT).balanceOf(address(mgr)), 2e18);
@@ -104,7 +107,7 @@ contract ForkBscTest is Test {
         console.log("BTCB in pot", IERC20(BTCB).balanceOf(p));
         assertGt(spent, 0); // refunded the rest
         assertLt(spent, 1 ether);
-        assertGt(IERC20(BTCB).balanceOf(p), 0);
+        assertEq(IERC20(BTCB).balanceOf(p), swapper.quote(mgr.swapRoute(p), 190e18));
         assertEq(mgr.referralEarnings(ref, USDT), 2e18);
         assertEq(address(mgr).balance + address(swapper).balance, 0);
         assertEq(IERC20(WBNB).balanceOf(address(swapper)), 0);
@@ -127,7 +130,7 @@ contract ForkBscTest is Test {
         deal(USDT, buyer, 1_000e18);
         vm.startPrank(buyer);
         IERC20(USDT).approve(address(mgr), type(uint256).max);
-        mgr.buyTickets(p, _ids(1, 2), ref);
+        mgr.buyTicketsWith(p, _ids(1, 2), USDT, 250e18, block.timestamp + 60, ref);
         vm.stopPrank();
         vm.prank(ref);
         mgr.claimReferral(USDT);

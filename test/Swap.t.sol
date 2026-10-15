@@ -5,7 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Pool} from "../src/Pool.sol";
 import "../src/PoolManager.sol";
-import {PancakeV3Swapper, INVALID_TWAP_WINDOW, INVALID_SLIPPAGE} from "../src/PancakeV3Swapper.sol";
+import {PancakeV3Swapper, INVALID_TWAP_WINDOW} from "../src/PancakeV3Swapper.sol";
 import {ISwapper} from "../src/interface/ISwapper.sol";
 import {Winfall} from "../src/interface/IPoolManager.sol";
 import {IV3SwapRouter} from "../src/interface/IV3SwapRouter.sol";
@@ -74,26 +74,10 @@ contract MockFactory {
 /// pays amountIn * num / den of tokenOut per (tokenIn, tokenOut), like pools whose spot price is num/den
 contract MockRouter {
     mapping(address => mapping(address => uint256[2])) public rate;
-    bool public ignoreMin;
     bytes public lastPath;
 
     function setRate(address a, address b, uint256 n, uint256 d) external {
         rate[a][b] = [n, d];
-    }
-
-    function setIgnoreMin(bool v) external {
-        ignoreMin = v;
-    }
-
-    function exactInput(IV3SwapRouter.ExactInputParams calldata p) external payable returns (uint256 out) {
-        lastPath = p.path;
-        address tokenIn = address(bytes20(p.path[:20]));
-        address tokenOut = address(bytes20(p.path[p.path.length - 20:]));
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), p.amountIn);
-        uint256[2] memory r = rate[tokenIn][tokenOut];
-        out = p.amountIn * r[0] / r[1];
-        require(ignoreMin || out >= p.amountOutMinimum, "Too little received");
-        Tok(tokenOut).mint(p.recipient, out);
     }
 
     function exactOutput(IV3SwapRouter.ExactOutputParams calldata p) external payable returns (uint256 amountIn) {
@@ -155,7 +139,9 @@ contract SwapTest is Test {
         mgr = new PoolManager(address(this), treasury, address(impl), address(coord), 5);
         mgr.setSwapper(address(swapper));
         router.setRate(address(usdt), address(btc), 1, 60000);
+        router.setRate(address(btc), address(usdt), 60000, 1);
         router.setRate(address(wbnb), address(usdt), 600, 1);
+        router.setRate(address(wbnb), address(btc), 1, 100);
         vm.deal(address(wbnb), 1_000_000 ether); // backing for withdraw of minted mock wbnb
         usdt.mint(buyer, 1_000_000e18);
         vm.prank(buyer);
@@ -227,51 +213,137 @@ contract SwapTest is Test {
 
     // ---- twap ----
 
-    function test_twapMinOutMatchesPrice() public {
-        swapper.setMaxSlippage(0);
-        assertApproxEqRel(swapper.minOut(_direct(500), 60000e18), 1e18, 0.0002e18);
+    function test_twapQuoteMatchesPrice() public view {
+        assertApproxEqRel(swapper.quote(_direct(500), 60000e18), 1e18, 0.0002e18);
         bytes memory viaBnb = abi.encodePacked(address(usdt), uint24(500), address(wbnb), uint24(2500), address(btc));
-        assertApproxEqRel(swapper.minOut(viaBnb, 60000e18), 1e18, 0.0003e18);
+        assertApproxEqRel(swapper.quote(viaBnb, 60000e18), 1e18, 0.0003e18);
     }
 
-    // ---- buying through the manager ----
+    // ---- cross currency pools: 100 usdt tickets, 5% fee, btc pot ----
 
-    function test_createPoolStoresRouteAndBuyFillsPotInBtc() public {
+    /// what the pot is owed for 2 tickets: the btc that 190 usdt are worth at the twap
+    function _potAmount() internal view returns (uint256) {
+        return swapper.quote(_direct(500), 190e18);
+    }
+
+    function test_crossCurrencyPoolNeedsBuyTicketsWith() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         assertEq(mgr.swapRoute(p), _direct(500));
         vm.prank(buyer);
+        vm.expectRevert(USE_BUY_TICKETS_WITH.selector); // no price limit, no market purchase
         mgr.buyTickets(p, _ids(1, 2), ref);
+    }
+
+    function test_payInPaymentToken_potGetsTheTwapAmount() public {
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
+        uint256 owed = _potAmount();
+        assertApproxEqRel(owed, uint256(190e18) / 60000, 0.0002e18);
+
+        uint256 before = usdt.balanceOf(buyer);
+        vm.prank(buyer);
+        mgr.buyTicketsWith(p, _ids(1, 2), address(usdt), 250e18, block.timestamp, ref);
+
+        assertEq(btc.balanceOf(p), owed); // exactly what it's owed
+        assertEq(mgr.soldIntoPot(p), owed);
+        assertEq(usdt.balanceOf(treasury), 8e18); // 10 usdt fee, 2 of it to the referrer
+        assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
+        // the buyer paid the fee plus what the btc cost on the market, the rest of the 250 came back
+        uint256 spent = before - usdt.balanceOf(buyer);
+        assertEq(spent, 10e18 + owed * 60000);
+        assertApproxEqRel(spent, 200e18, 0.0002e18);
+        assertEq(Pool(payable(p)).ownerOf(2), buyer);
+        _assertNothingLeft();
+    }
+
+    /// a pushed price can't shortchange the pot and can't block the purchase: it only changes what the buyer pays
+    function test_marketPriceOnlyChangesWhatTheBuyerPays() public {
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
+        uint256 owed = _potAmount();
+
+        router.setRate(address(usdt), address(btc), 98, 100 * 60000); // btc 2% more expensive than the twap
+        uint256 before = usdt.balanceOf(buyer);
+        vm.prank(buyer);
+        mgr.buyTicketsWith(p, _ids(1, 2), address(usdt), 250e18, block.timestamp, ref);
+        assertEq(btc.balanceOf(p), owed); // the pot still gets all of it
+        uint256 spent = before - usdt.balanceOf(buyer);
+        assertGt(spent, 203e18); // 10 + 190 / 0.98
+        assertLt(spent, 204.5e18);
+
+        vm.prank(buyer); // the buyer's own limit is the only thing that stops a purchase: the pot's btc fits in 201,
+        vm.expectPartialRevert(MAX_AMOUNT_IN_EXCEEDED.selector); // the 10 usdt fee on top doesn't
+        mgr.buyTicketsWith(p, _ids(3, 4), address(usdt), 201e18, block.timestamp, ref);
+        vm.prank(buyer); // and a limit below the btc's cost stops it at the swap
+        vm.expectRevert(bytes("Too much requested"));
+        mgr.buyTicketsWith(p, _ids(3, 4), address(usdt), 190e18, block.timestamp, ref);
+
+        router.setRate(address(usdt), address(btc), 102, 100 * 60000); // btc 2% cheaper than the twap
+        before = usdt.balanceOf(buyer);
+        vm.prank(buyer);
+        mgr.buyTicketsWith(p, _ids(3, 4), address(usdt), 250e18, block.timestamp, ref);
+        assertEq(btc.balanceOf(p), 2 * owed);
+        assertLt(before - usdt.balanceOf(buyer), 197e18); // 10 + 190 / 1.02
+        _assertNothingLeft();
+    }
+
+    /// paying with the pot currency: the pot part isn't swapped, only the fee is
+    function test_payWithPotCurrency() public {
+        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
+        uint256 owed = _potAmount();
+        btc.mint(buyer, 1e18);
+        vm.startPrank(buyer);
+        btc.approve(address(mgr), 1e18);
+        mgr.buyTicketsWith(p, _ids(1, 2), address(btc), 0.01e18, block.timestamp, ref);
+        vm.stopPrank();
+        assertEq(btc.balanceOf(p), owed);
+        uint256 feeCost = (uint256(10e18) + 59999) / 60000; // 10 usdt of fee bought with btc
+        assertEq(btc.balanceOf(buyer), 1e18 - owed - feeCost);
         assertEq(usdt.balanceOf(treasury), 8e18);
         assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
-        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
-        assertEq(router.lastPath(), _direct(500));
-        assertEq(
-            usdt.balanceOf(address(mgr)) + usdt.balanceOf(address(swapper)), mgr.referralEarnings(ref, address(usdt))
-        );
-        assertEq(usdt.allowance(address(mgr), address(swapper)) + usdt.allowance(address(swapper), address(router)), 0);
+        _assertNothingLeft();
     }
 
-    function test_manipulatedPriceReverts() public {
+    /// paying with a third token: it buys the pot's btc and the fee's usdt directly
+    function test_payWithWbnbToken() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
-        router.setRate(address(usdt), address(btc), 98, 100 * 60000); // spot pushed 2% below twap, cap is 1%
-        vm.prank(buyer);
-        vm.expectRevert(bytes("Too little received"));
-        mgr.buyTickets(p, _ids(1, 2), ref);
-        router.setIgnoreMin(true); // a router ignoring the min is still caught
-        uint256 min = swapper.minOut(_direct(500), 190e18);
-        vm.prank(buyer);
-        vm.expectRevert(
-            abi.encodeWithSelector(ISwapper.SWAP_OUTPUT_TOO_LOW.selector, min, uint256(190e18) * 98 / (100 * 60000))
-        );
-        mgr.buyTickets(p, _ids(1, 2), ref);
+        uint256 owed = _potAmount();
+        wbnb.mint(buyer, 5e18);
+        vm.startPrank(buyer);
+        wbnb.approve(address(mgr), 5e18);
+        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 1e18, block.timestamp, ref); // ~1/3 bnb needed, max 1
+        vm.stopPrank();
+        uint256 spent = owed * 100 + (uint256(10e18) + 599) / 600; // btc at 100 bnb, fee at 600 usdt per bnb
+        assertEq(wbnb.balanceOf(buyer), 5e18 - spent); // unspent refunded
+        assertEq(btc.balanceOf(p), owed);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
+        assertEq(Pool(payable(p)).ownerOf(1), buyer);
+        _assertNothingLeft();
     }
 
-    function test_withinSlippagePasses() public {
+    function test_payWithNativeBnb() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
-        router.setRate(address(usdt), address(btc), 995, 1000 * 60000); // 0.5% worse than twap
+        uint256 owed = _potAmount();
+        vm.deal(buyer, 1 ether);
         vm.prank(buyer);
-        mgr.buyTickets(p, _ids(1, 2), ref);
-        assertGt(btc.balanceOf(p), 0);
+        mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
+        assertEq(buyer.balance, 1 ether - owed * 100 - (uint256(10e18) + 599) / 600); // native refund
+        assertEq(btc.balanceOf(p), owed);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        _assertNothingLeft();
+    }
+
+    /// native bnb into a wbnb pot: the pot part is only wrapped, the fee is swapped
+    function test_payNativeIntoWrappedNativePot() public {
+        address p = mgr.createPool("BNB", _w(address(usdt), address(wbnb)));
+        uint256 owed = swapper.quote(abi.encodePacked(address(usdt), uint24(500), address(wbnb)), 190e18);
+        assertApproxEqRel(owed, uint256(190e18) / 600, 0.0002e18);
+        vm.deal(buyer, 1 ether);
+        vm.prank(buyer);
+        mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
+        assertEq(wbnb.balanceOf(p), owed);
+        assertEq(buyer.balance, 1 ether - owed - (uint256(10e18) + 599) / 600);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        _assertNothingLeft();
     }
 
     function test_refreshRoute() public {
@@ -293,8 +365,6 @@ contract SwapTest is Test {
         mgr.createPool("X", _w(address(usdt), address(0)));
         vm.expectRevert(INVALID_TWAP_WINDOW.selector);
         swapper.setTwapWindow(60);
-        vm.expectRevert(INVALID_SLIPPAGE.selector);
-        swapper.setMaxSlippage(1_001);
         vm.startPrank(buyer);
         vm.expectRevert();
         swapper.setTwapWindow(600);
@@ -314,40 +384,46 @@ contract SwapTest is Test {
         bare.createPool("X", _w(address(usdt), address(btc)));
     }
 
-    // ---- paying with another token ----
-
-    function test_buyWithWbnbToken() public {
+    function test_buyWithRejects() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         wbnb.mint(buyer, 5e18);
+        btc.mint(buyer, 1e18);
         vm.startPrank(buyer);
         wbnb.approve(address(mgr), 5e18);
-        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 1e18, block.timestamp, ref); // 200 usdt = 1/3 bnb, max 1 bnb
-        vm.stopPrank();
-        uint256 spent = (uint256(200e18) + 599) / 600;
-        assertEq(wbnb.balanceOf(buyer), 5e18 - spent); // unspent refunded
-        assertEq(usdt.balanceOf(treasury), 8e18);
-        assertEq(mgr.referralEarnings(ref, address(usdt)), 2e18);
-        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
-        assertEq(Pool(payable(p)).ownerOf(1), buyer);
-        _assertNothingLeft();
-    }
-
-    function test_buyWithNativeBnb() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
+        btc.approve(address(mgr), 1e18);
+        vm.expectRevert(bytes("Too much requested")); // max below what the pot's btc costs
+        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 0.3e18, block.timestamp, ref);
+        uint256 owed = _potAmount();
+        vm.expectRevert(abi.encodeWithSelector(MAX_AMOUNT_IN_EXCEEDED.selector, owed - 1, owed)); // same, no swap
+        mgr.buyTicketsWith(p, _ids(1, 2), address(btc), owed - 1, block.timestamp, ref);
+        vm.expectRevert(EXPIRED.selector);
+        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 1e18, block.timestamp - 1, ref);
         vm.deal(buyer, 1 ether);
-        vm.prank(buyer);
-        mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
-        assertEq(buyer.balance, 1 ether - (uint256(200e18) + 599) / 600); // native refund
-        assertEq(btc.balanceOf(p), uint256(190e18) / 60000);
-        _assertNothingLeft();
+        vm.expectRevert(abi.encodeWithSelector(WRONG_PAYMENT.selector, 2 ether, 1 ether));
+        mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 2 ether, block.timestamp, ref);
+        doge.mint(buyer, 1e18);
+        doge.approve(address(mgr), 1e18);
+        vm.expectRevert(abi.encodeWithSelector(ISwapper.NO_ROUTE.selector, address(doge), address(btc)));
+        mgr.buyTicketsWith(p, _ids(1, 2), address(doge), 1e18, block.timestamp, ref);
+        vm.stopPrank();
+        assertEq(btc.balanceOf(p), 0); // nothing went through
+        assertEq(wbnb.balanceOf(buyer), 5e18);
     }
 
-    function test_buyWithSamePotCurrencyNoPotSwap() public {
+    // ---- same currency pools paid with another token ----
+
+    function test_sameCurrencyPoolPaidWithNative() public {
         address p = mgr.createPool("USDT", _w(address(usdt), address(usdt)));
         vm.deal(buyer, 1 ether);
         vm.prank(buyer);
         mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 1 ether, block.timestamp, ref);
         assertEq(usdt.balanceOf(p), 190e18);
+        assertEq(buyer.balance, 1 ether - (uint256(200e18) + 599) / 600);
+        assertEq(usdt.balanceOf(treasury), 8e18);
+        vm.prank(buyer); // paying in the pool's own token is what buyTickets is for
+        vm.expectRevert(USE_BUY_TICKETS.selector);
+        mgr.buyTicketsWith(p, _ids(3, 4), address(usdt), 250e18, block.timestamp, ref);
+        _assertNothingLeft();
     }
 
     function test_twoHopExactOutUsesReversedPath() public {
@@ -366,39 +442,19 @@ contract SwapTest is Test {
         assertEq(doge.balanceOf(buyer), 10_000e18 - 2_000e18);
     }
 
-    function test_buyWithRejects() public {
-        address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
-        wbnb.mint(buyer, 5e18);
-        vm.startPrank(buyer);
-        wbnb.approve(address(mgr), 5e18);
-        vm.expectRevert(bytes("Too much requested")); // max below the price
-        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 0.3e18, block.timestamp, ref);
-        vm.expectRevert(EXPIRED.selector);
-        mgr.buyTicketsWith(p, _ids(1, 2), address(wbnb), 1e18, block.timestamp - 1, ref);
-        vm.expectRevert(USE_BUY_TICKETS.selector);
-        mgr.buyTicketsWith(p, _ids(1, 2), address(usdt), 1e18, block.timestamp, ref);
-        vm.deal(buyer, 1 ether);
-        vm.expectRevert(abi.encodeWithSelector(WRONG_PAYMENT.selector, 2 ether, 1 ether));
-        mgr.buyTicketsWith{value: 1 ether}(p, _ids(1, 2), address(0), 2 ether, block.timestamp, ref);
-        doge.mint(buyer, 1e18);
-        doge.approve(address(mgr), 1e18);
-        vm.expectRevert(abi.encodeWithSelector(ISwapper.NO_ROUTE.selector, address(doge), address(usdt)));
-        mgr.buyTicketsWith(p, _ids(1, 2), address(doge), 1e18, block.timestamp, ref);
-        vm.stopPrank();
-    }
+    // ---- airdrops ----
 
     /// usdt tickets, btc pot: the seeded btc is valued in usdt at the twap to size the airdrop allowance
     function test_airdropAllowanceValuesSeedAtTwap() public {
         address p = mgr.createPool("BTC", _w(address(usdt), address(btc)));
         assertEq(mgr.airdropsLeft(p), 0);
-        btc.mint(p, 1e18); // seeded: 1 btc = 60000 usdt = 600 tickets of 100 usdt
-        // minus the swapper's 1% slippage margin and tick rounding
-        assertApproxEqAbs(mgr.airdropsLeft(p), 594, 2);
+        btc.mint(p, 1e18); // seeded: 1 btc = 60000 usdt = 600 tickets of 100 usdt (tick rounding aside)
+        assertApproxEqAbs(mgr.airdropsLeft(p), 600, 1);
         uint256 before = mgr.airdropsLeft(p);
 
-        vm.prank(buyer); // sales are swapped into the pot too, but only the seed counts
-        mgr.buyTickets(p, _ids(1, 2), ref);
-        assertEq(mgr.soldIntoPot(p), uint256(190e18) / 60000);
+        vm.prank(buyer); // sales put btc in the pot too, but only the seed counts
+        mgr.buyTicketsWith(p, _ids(1, 2), address(usdt), 250e18, block.timestamp, ref);
+        assertEq(mgr.soldIntoPot(p), _potAmount());
         assertEq(mgr.seededPot(p), 1e18);
         assertEq(mgr.airdropsLeft(p), before);
 
@@ -411,12 +467,16 @@ contract SwapTest is Test {
         assertEq(mgr.airdropsLeft(p), before - 1);
     }
 
+    /// neither contract keeps the buyer's money or an open approval, only unclaimed referral earnings stay
     function _assertNothingLeft() internal view {
         assertEq(
             usdt.balanceOf(address(mgr)) + usdt.balanceOf(address(swapper)), mgr.referralEarnings(ref, address(usdt))
         );
         assertEq(wbnb.balanceOf(address(mgr)) + wbnb.balanceOf(address(swapper)), 0);
+        assertEq(btc.balanceOf(address(mgr)) + btc.balanceOf(address(swapper)), 0);
         assertEq(address(mgr).balance + address(swapper).balance, 0);
         assertEq(wbnb.allowance(address(mgr), address(swapper)) + wbnb.allowance(address(swapper), address(router)), 0);
+        assertEq(usdt.allowance(address(mgr), address(swapper)) + usdt.allowance(address(swapper), address(router)), 0);
+        assertEq(btc.allowance(address(mgr), address(swapper)) + btc.allowance(address(swapper), address(router)), 0);
     }
 }

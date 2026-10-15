@@ -29,6 +29,9 @@ error NATIVE_SWAP_UNSUPPORTED();
 error SWAPPER_NOT_SET();
 error NO_SWAP_NEEDED();
 error USE_BUY_TICKETS();
+error USE_BUY_TICKETS_WITH();
+error MAX_AMOUNT_IN_EXCEEDED(uint256 maxAmountIn, uint256 needed);
+error ONLY_SWAPPER();
 error EXPIRED();
 error NOTHING_TO_CLAIM();
 
@@ -56,7 +59,8 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     /// swaps the pot's share of a ticket into the pot currency when paymentToken != currency
     ISwapper public swapper;
-    /// route used for each pool's swaps, found by the swapper when the pool is created
+    /// route a cross currency pool's pot amount is priced along (paymentToken -> pot currency), found by the swapper
+    /// when the pool is created
     mapping(address => bytes) public swapRoute;
 
     /// who referred each buyer: set by their first purchase with a referrer, the only one that pays a referral
@@ -264,14 +268,13 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     /// @notice how many more tickets of `pool` can be airdropped right now. airdropped tickets can be worth as much
     ///         as the money seeded into the pot, counted at the ticket price: every free ticket is backed by seeded
     ///         money like a bought one is by its price. ticket sales and money rolled over from another pool don't
-    ///         add any allowance. a pot in another currency than the tickets is valued at the swapper's twap (minus
-    ///         its slippage)
+    ///         add any allowance. a pot in another currency than the tickets is valued at the swapper's twap
     function airdropsLeft(address pool) public view returns (uint256) {
         Winfall storage w = _winfalls[pool];
         require(w.pool != address(0), UNKNOWN_POOL(pool));
         uint256 seeded = seededPot(pool);
         if (seeded > 0 && w.paymentToken != w.currency) {
-            seeded = swapper.minOut(swapper.findRoute(w.currency, w.paymentToken), seeded);
+            seeded = swapper.quote(swapper.findRoute(w.currency, w.paymentToken), seeded);
         }
         uint256 allowed = seeded / w.ticketPrice;
         uint256 airdropped = IPool(pool).ticketsAirdropped();
@@ -312,22 +315,21 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
 
     // ---- tickets ----
 
-    /// @notice buys the tickets numbered `ticketIds` of `pool` for msg.sender at the pool's ticketPrice each.
+    /// @notice buys the tickets numbered `ticketIds` of `pool` for msg.sender at the pool's ticketPrice each, paid in
+    ///         the pool's paymentToken. for pools whose pot is in that same token (others: buyTicketsWith).
     ///         the whole batch reverts with TICKET_TAKEN if any id is already bought (check with pool.ticketExists first).
-    ///         paid in paymentToken: feeBps of the price is the protocol fee, the rest goes into the pool's pot.
-    ///         out of that fee the buyer's referrer gets referralBps of the price (claimable with claimReferral),
-    ///         the fee treasury gets what's left of it.
-    ///         if the pot currency differs, the swapper swaps that rest into the pot currency straight into the pool
-    ///         along the pool's stored route, reverting if the pool would get less than the twap fair amount.
+    ///         feeBps of the price is the protocol fee, the rest goes into the pool's pot. out of that fee the buyer's
+    ///         referrer gets referralBps of the price (claimable with claimReferral), the fee treasury what's left.
     ///         native pools take exact msg.value, token pools need an approval of the full price.
     /// @param referrer who referred the buyer, address(0) for nobody. a buyer pays a referral once, on their first
     ///        purchase with a referrer. it's ignored on every purchase after that, in any pool
     function buyTickets(address pool, uint256[] calldata ticketIds, address referrer) external payable nonReentrant {
         Winfall storage w = _checkBuy(pool, ticketIds.length);
+        // a pot in another currency has to be bought on the market, which needs the buyer's price limit
+        require(w.paymentToken == w.currency, USE_BUY_TICKETS_WITH());
         uint256 total = w.ticketPrice * ticketIds.length;
 
         if (w.paymentToken == address(0)) {
-            // native in, native pot (createPool rules out native swaps)
             require(msg.value == total, WRONG_PAYMENT(total, msg.value));
         } else {
             require(msg.value == 0, WRONG_PAYMENT(0, msg.value));
@@ -337,10 +339,15 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         _mint(pool, ticketIds, total, w, paidReferrer);
     }
 
-    /// @notice like buyTickets, but pays with any token (or native, tokenIn = address(0) with msg.value = maxAmountIn)
-    ///         that the swapper can route into the pool's paymentToken. swaps exactly the ticket price's worth and
-    ///         refunds whatever of maxAmountIn wasn't needed straight to the buyer.
-    /// @param maxAmountIn the most tokenIn the buyer is willing to spend, their slippage limit (quote it off chain)
+    /// @notice buys tickets paying with `tokenIn` (address(0) = native, with msg.value = maxAmountIn), swapped on the
+    ///         buyer's account into exactly what the purchase owes. whatever of maxAmountIn isn't needed is refunded.
+    ///         - pot in the pool's paymentToken: tokenIn is swapped into exactly the ticket price.
+    ///         - pot in another currency: the pool is owed the pot currency that the pot's part of the price is worth
+    ///           at the twap, and the protocol its fee in paymentToken. the buyer's tokenIn buys exactly those two
+    ///           amounts (a part that's already in the right token isn't swapped), also when tokenIn is the
+    ///           paymentToken itself. the pot gets its full amount whatever the market does during the purchase: a
+    ///           pushed price only makes the purchase cost the buyer more, up to maxAmountIn.
+    /// @param maxAmountIn the most tokenIn the buyer is willing to spend (quote it off chain and add a margin)
     /// @param deadline the purchase reverts after this timestamp, so a stuck transaction can't fill at a stale price
     /// @param referrer same as in buyTickets
     function buyTicketsWith(
@@ -353,32 +360,84 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
     ) external payable nonReentrant {
         require(block.timestamp <= deadline, EXPIRED());
         Winfall storage w = _checkBuy(pool, ticketIds.length);
-        address payToken = w.paymentToken;
-        require(payToken != address(0), NATIVE_SWAP_UNSUPPORTED());
-        require(tokenIn != payToken, USE_BUY_TICKETS());
+        require(w.paymentToken != address(0), NATIVE_SWAP_UNSUPPORTED());
         require(address(swapper) != address(0), SWAPPER_NOT_SET());
         uint256 total = w.ticketPrice * ticketIds.length;
+        address paidReferrer = _referrer(referrer);
 
-        // swap into exactly `total` paymentToken held here, the buyer gets the unspent input back directly
-        uint256 spent;
+        emit PaidWithSwap(pool, msg.sender, tokenIn, _payWith(w, pool, total, tokenIn, maxAmountIn, paidReferrer));
+        _mint(pool, ticketIds, total, w, paidReferrer);
+    }
+
+    /// @dev takes the buyer's whole limit of tokenIn, delivers what the purchase owes out of it and gives the rest
+    ///      back. returns what was spent
+    function _payWith(
+        Winfall storage w,
+        address pool,
+        uint256 total,
+        address tokenIn,
+        uint256 maxAmountIn,
+        address referrer
+    ) internal returns (uint256) {
         if (tokenIn == address(0)) {
             require(msg.value == maxAmountIn, WRONG_PAYMENT(maxAmountIn, msg.value));
-            spent = swapper.swapExactOut{value: msg.value}(
-                address(0), payToken, total, msg.value, address(this), msg.sender
-            );
         } else {
             require(msg.value == 0, WRONG_PAYMENT(0, msg.value));
-            IERC20 input = IERC20(tokenIn);
-            SafeERC20.safeTransferFrom(input, msg.sender, address(this), maxAmountIn);
-            SafeERC20.forceApprove(input, address(swapper), maxAmountIn);
-            spent = swapper.swapExactOut(tokenIn, payToken, total, maxAmountIn, address(this), msg.sender);
-            SafeERC20.forceApprove(input, address(swapper), 0);
+            SafeERC20.safeTransferFrom(IERC20(tokenIn), msg.sender, address(this), maxAmountIn);
         }
-        emit PaidWithSwap(pool, msg.sender, tokenIn, spent);
 
-        address paidReferrer = _referrer(referrer);
-        _distribute(w, pool, total, address(this), paidReferrer);
-        _mint(pool, ticketIds, total, w, paidReferrer);
+        uint256 left = maxAmountIn;
+        address payToken = w.paymentToken;
+        if (payToken == w.currency) {
+            require(tokenIn != payToken, USE_BUY_TICKETS());
+            left -= _deliver(tokenIn, payToken, total, left, address(this));
+            _distribute(w, pool, total, address(this), referrer);
+        } else {
+            uint256 fee = total * w.feeBps / FEE_DENOMINATOR;
+            // what the pot's part of the price is worth in the pot currency, at a price the buyer can't move
+            uint256 potAmount = swapper.quote(swapRoute[pool], total - fee);
+            left -= _deliver(tokenIn, w.currency, potAmount, left, pool);
+            left -= _deliver(tokenIn, payToken, fee, left, address(this));
+            soldIntoPot[pool] += potAmount;
+            _payFee(w, total, fee, referrer);
+        }
+
+        if (left > 0) {
+            if (tokenIn == address(0)) {
+                _sendEth(msg.sender, left);
+            } else {
+                SafeERC20.safeTransfer(IERC20(tokenIn), msg.sender, left);
+            }
+        }
+        return maxAmountIn - left;
+    }
+
+    /// @dev gets exactly `amountOut` of `tokenOut` to `recipient`, paid out of `budget` of `tokenIn` held by this
+    ///      contract. no swap if it's the same token. returns what it cost, unspent input comes back here
+    function _deliver(address tokenIn, address tokenOut, uint256 amountOut, uint256 budget, address recipient)
+        internal
+        returns (uint256 cost)
+    {
+        if (amountOut == 0) return 0;
+        if (tokenIn == tokenOut) {
+            require(amountOut <= budget, MAX_AMOUNT_IN_EXCEEDED(budget, amountOut));
+            if (recipient != address(this)) {
+                SafeERC20.safeTransfer(IERC20(tokenOut), recipient, amountOut);
+            }
+            return amountOut;
+        }
+        if (tokenIn == address(0)) {
+            return
+                swapper.swapExactOut{value: budget}(address(0), tokenOut, amountOut, budget, recipient, address(this));
+        }
+        SafeERC20.forceApprove(IERC20(tokenIn), address(swapper), budget);
+        cost = swapper.swapExactOut(tokenIn, tokenOut, amountOut, budget, recipient, address(this));
+        SafeERC20.forceApprove(IERC20(tokenIn), address(swapper), 0);
+    }
+
+    /// @dev native refunds of unspent input from the swapper
+    receive() external payable {
+        require(msg.sender == address(swapper), ONLY_SWAPPER());
     }
 
     function _checkBuy(address pool, uint256 count) internal view returns (Winfall storage w) {
@@ -412,40 +471,37 @@ contract PoolManager is IPoolManager, AccessControl, ReentrancyGuard {
         return referrer;
     }
 
-    /// @dev splits `total` paymentToken into the protocol fee and the pot, and the fee into the referrer's cut and
-    ///      the treasury's. `from` is the buyer (pull with an approval) or this contract (already holds it after a
-    ///      swap). native payments already arrived as msg.value. the referral cut stays here as claimable earnings,
-    ///      so a referrer that can't receive can't block purchases
+    /// @dev same currency pools: splits `total` paymentToken into the protocol fee and the pot. `from` is the buyer
+    ///      (pull with an approval) or this contract (already holds it after a swap). native payments already
+    ///      arrived as msg.value
     function _distribute(Winfall storage w, address pool, uint256 total, address from, address referrer) internal {
         uint256 fee = total * w.feeBps / FEE_DENOMINATOR;
         uint256 toPot = total - fee;
-        // a share of the ticket price like the fee, but taken out of the fee, never out of the pot
-        uint256 referralCut = referrer == address(0) ? 0 : total * w.referralBps / FEE_DENOMINATOR;
-        uint256 protocolFee = fee - referralCut;
+        address payToken = w.paymentToken;
+        if (payToken == address(0)) {
+            _sendEth(pool, toPot);
+        } else {
+            _move(IERC20(payToken), from, pool, toPot);
+            _move(IERC20(payToken), from, address(this), fee);
+        }
+        soldIntoPot[pool] += toPot;
+        _payFee(w, total, fee, referrer);
+    }
 
+    /// @dev splits the protocol fee, held by this contract in paymentToken, into the referrer's cut and the
+    ///      treasury's. the referral is a share of the ticket price like the fee, but taken out of the fee, never
+    ///      out of the pot. it stays here as claimable earnings, so a referrer that can't receive can't block
+    ///      purchases
+    function _payFee(Winfall storage w, uint256 total, uint256 fee, address referrer) internal {
+        uint256 referralCut = referrer == address(0) ? 0 : total * w.referralBps / FEE_DENOMINATOR;
         address payToken = w.paymentToken;
         if (referralCut > 0) {
             referralEarnings[referrer][payToken] += referralCut;
         }
         if (payToken == address(0)) {
-            _sendEth(feeTreasury, protocolFee);
-            _sendEth(pool, toPot);
-            soldIntoPot[pool] += toPot;
-            return;
-        }
-
-        IERC20 token = IERC20(payToken);
-        _move(token, from, feeTreasury, protocolFee);
-        _move(token, from, address(this), referralCut);
-        if (payToken == w.currency) {
-            _move(token, from, pool, toPot);
-            soldIntoPot[pool] += toPot;
+            _sendEth(feeTreasury, fee - referralCut);
         } else {
-            // swapper checks the output against the route's twap and sends it straight into the pool
-            _move(token, from, address(this), toPot);
-            SafeERC20.forceApprove(token, address(swapper), toPot);
-            soldIntoPot[pool] += swapper.swap(swapRoute[pool], toPot, pool);
-            SafeERC20.forceApprove(token, address(swapper), 0);
+            _move(IERC20(payToken), address(this), feeTreasury, fee - referralCut);
         }
     }
 

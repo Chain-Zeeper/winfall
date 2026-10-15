@@ -23,7 +23,7 @@ import {Winfall} from "../src/interface/IPoolManager.sol";
 ///           DIFFICULTIES     default "" (every position always won). bps per position, comma separated, max 9000
 contract CreatePool is Script {
     function run() external returns (address pool) {
-        PoolManager manager = PoolManager(vm.envAddress("POOL_MANAGER"));
+        PoolManager manager = PoolManager(payable(vm.envAddress("POOL_MANAGER")));
 
         Winfall memory w;
         w.name = vm.envOr("POOL_NAME", string("Winfall"));
